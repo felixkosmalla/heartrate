@@ -1,4 +1,6 @@
-
+#include "Arduino.h"
+#include "signal.h"
+#include "graphics.h"
 
 
 

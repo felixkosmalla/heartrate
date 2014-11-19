@@ -1,6 +1,11 @@
 #ifndef _H_GRAPHICS_
 #define _H_GRAPHICS_
 
+#include "Arduino.h"
+#include "Adafruit_GFX.h"
+#include "Adafruit_ILI9341.h"
+
+
 
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
