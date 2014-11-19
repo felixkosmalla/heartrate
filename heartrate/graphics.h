@@ -1,9 +1,7 @@
 #ifndef _H_GRAPHICS_
 #define _H_GRAPHICS_
 
-#include "Arduino.h"
-#include "Adafruit_GFX.h"
-#include "Adafruit_ILI9341.h"
+#include <ILI9341_t3.h>
 
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
@@ -23,9 +21,6 @@
 
 #define TFT_DC 9
 #define TFT_CS 10
-
-// Use hardware SPI (on Uno, #13, #12, #11) and the above for CS/DC
-extern Adafruit_ILI9341 tft;
 
 void graphics_setup(void);
 void graphics_loop(void);
