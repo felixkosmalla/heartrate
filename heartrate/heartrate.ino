@@ -2,19 +2,12 @@
 #include "signal.h"
 #include "graphics.h"
 
-
-
-void setup(){
-  
-
-
+void setup()
+{
   graphics_setup();
 }
 
-
-
-
-void loop(){
-
+void loop()
+{
     graphics_loop();
 }

@@ -5,8 +5,6 @@
 #include "Adafruit_GFX.h"
 #include "Adafruit_ILI9341.h"
 
-
-
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
 
@@ -23,23 +21,13 @@
 #define YELLOW   0xFFE0
 #define WHITE    0xFFFF
 
-
 #define TFT_DC 9
 #define TFT_CS 10
 
 // Use hardware SPI (on Uno, #13, #12, #11) and the above for CS/DC
 extern Adafruit_ILI9341 tft;
 
-
 void graphics_setup(void);
-
 void graphics_loop(void);
 
-
-
-
-
 #endif
-
-
-

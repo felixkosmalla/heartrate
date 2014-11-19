@@ -1,26 +1,11 @@
 #include "graphics.h"
 
-
-
-
-
-
-
-
-
-
-void graphics_setup(){
-
-
+void graphics_setup()
+{
 
 }
 
-
-void graphis_loop(){
-
-
+void graphis_loop()
+{
 
 }
-
-
-
