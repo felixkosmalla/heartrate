@@ -2,6 +2,9 @@
 #define _H_SIGNAL_
 
 void signal_setup(void);
-void signal_loop(void);
+void adcCalibrate(void);
+void adcInit(void);
+void pdbInit(void);
+void dmaInit(void);
 
 #endif
