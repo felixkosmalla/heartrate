@@ -9,6 +9,10 @@
 
 void setup()
 {
+	// setup the heart rate signale aquision
+	signal_setup();
+
+	// setup the heart rate display
     graphics_setup();
 }
 

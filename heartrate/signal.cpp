@@ -1,68 +1,81 @@
 #include "signal.h"
 #include "Arduino.h"
 
+// Forward declarations.
+void adcInit(void);
+void adcCalibrate(void);
+void pdbInit(void);
+
 void signal_setup()
 {
 	adcInit();
 	pdbInit();
-	dmaInit();
 }
 
-#define PDB_CH0C1_TOS 0x0100
-#define PDB_CH0C1_EN 0x01
+static const size_t SAMPLES_PER_SECOND = 250;
+static const size_t MEASURE_DURATION = 30; // 30sec
+volatile uint16_t buffer[SAMPLES_PER_SECOND*MEASURE_DURATION];
 
-uint8_t ledOn = 0;
-uint16_t samples[16];
+// ADC interrupt routine
+void adc0_isr() {
+	uint16_t val = ADC0_RA;
+}
 
-static const uint8_t channel2sc1a[] = {
-	5, 14, 8, 9, 13, 12, 6, 7, 15, 4,
-	0, 19, 3, 21, 26, 22
-};
+// The datasheet says ADC clock should be 1 to 18 MHz for 8-12 bit mode.
+// The bus clock runs at 48Mhz, thus, we will divide it by 4 to get 12Mhz.
+// See ADC_CFG1_ADIV(1) and ADC_CFG1_ADICLK(1).
+#define ADC_CFG1_12BIT  (ADC_CFG1_ADIV(1) | ADC_CFG1_ADICLK(1))
 
-/*
-	ADC_CFG1_ADIV(2)         Divide ratio = 4 (F_BUS = 48 MHz => ADCK = 12 MHz)
-	ADC_CFG1_MODE(2)         Single ended 10 bit mode
-	ADC_CFG1_ADLSMP          Long sample time
-*/
-#define ADC_CONFIG1 (ADC_CFG1_ADIV(1) | ADC_CFG1_MODE(2) | ADC_CFG1_ADLSMP)
+// We want the single-ended 12-bit resolution mode, that is, ADC_CFG1_ADICLK(1).
+// Enable the long sample time mode for higher precision, that is, ADC_CFG1_ADLSMP.
+#define ADC_CONFIG1 (ADC_CFG1_12BIT | ADC_CFG1_ADICLK(1) | ADC_CFG1_ADLSMP)
 
-/*
-	ADC_CFG2_MUXSEL          Select channels ADxxb
-	ADC_CFG2_ADLSTS(3)       Shortest long sample time
-*/
-#define ADC_CONFIG2 (ADC_CFG2_MUXSEL | ADC_CFG2_ADLSTS(3))
+// Select the ADxxb channels, that is, ADC_CFG2_MUXSEL.
+// Due to the long sample time mode and with 12-bit resolution we will add 6 extra
+// ADCK cycles (10 ADCK cycyles total sample time) according to the datasheet,
+// that is, ADC_CFG2_ADLSTS(2). We may return to default if values are too bad.
+#define ADC_CONFIG2 (ADC_CFG2_MUXSEL | ADC_CFG2_ADLSTS(2))
 
 void adcInit() {
+
 	ADC0_CFG1 = ADC_CONFIG1;
 	ADC0_CFG2 = ADC_CONFIG2;
-	// Voltage ref vcc, hardware trigger, DMA
+
+	// Use VCC/External as reference voltage, that is, ADC_SC2_REFSEL(0).
+	// Enable hardware triggering since we want to use the PDB to initiate
+	// a conversion, that is, ADC_SC2_ADTRG.
+	// Enable DMA mode, that is, ADC_SC2_DMAEN.
 	ADC0_SC2 = ADC_SC2_REFSEL(0) | ADC_SC2_ADTRG | ADC_SC2_DMAEN;
 
-	// Enable averaging, 4 samples
-	ADC0_SC3 = ADC_SC3_AVGE | ADC_SC3_AVGS(0);
+	// Enable hardware averaging, that is, ADC_SC3_AVGE.
+	// We will average by the default 16 samples, that is, ADC_SC3_AVGS(1).
+	ADC0_SC3 = ADC_SC3_AVGE | ADC_SC3_AVGS(1);
 
+	// Calibrate the ADC.
 	adcCalibrate();
-	Serial.println("calibrated");
 
-	// Enable ADC interrupt, configure pin
-	ADC0_SC1A = ADC_SC1_AIEN | channel2sc1a[3];
-	//NVIC_ENABLE_IRQ(IRQ_ADC0);
+	// Differential mode off, we want only single-ended 12-bit values
+	// Select input channel A0 and enable the ADC interrupt.
+	ADC0_SC1A = ADC_SC1_AIEN | 0;
+	NVIC_ENABLE_IRQ(IRQ_ADC0);
 }
 
 void adcCalibrate() {
 	uint16_t sum;
 
-	// Begin calibration
+	// Begin calibration.
 	ADC0_SC3 = ADC_SC3_CAL;
-	// Wait for calibration
+
+	// Wait until the CAL flag in the ADC0_SC3 register is cleared, i.e. the end of the calibration.
 	while (ADC0_SC3 & ADC_SC3_CAL);
 
-	// Plus side gain
+	// Plus side gain.
 	sum = ADC0_CLPS + ADC0_CLP4 + ADC0_CLP3 + ADC0_CLP2 + ADC0_CLP1 + ADC0_CLP0;
 	sum = (sum / 2) | 0x8000;
 	ADC0_PG = sum;
 
-	// Minus side gain (not used in single-ended mode)
+	// Minus side gain (not used in single-ended mode).
+	// FIXME: remove later on since not used.
 	sum = ADC0_CLMS + ADC0_CLM4 + ADC0_CLM3 + ADC0_CLM2 + ADC0_CLM1 + ADC0_CLM0;
 	sum = (sum / 2) | 0x8000;
 	ADC0_MG = sum;
@@ -70,109 +83,51 @@ void adcCalibrate() {
 
 /*
 	PDB clock frequency: 48Mhz = 48.000.000Hz
-	PDB interrupt frequency: 10kHz = 10.000Hz
-	PDB period: 1/10.000 = 0,0001sec = 0,1ms
+	PDB interrupt frequency: 320Hz
 
-	1/10.000 = (1/48.000.000) * x
-	x = (1/10.000) / (1/48000000) = 4800
-	1/240 = (1/48000000) * 4800
+	1/250 = (1/(48.000.000/40)) * x
+	x = (1/250) / (1/(48.000.000/40)) = 4800
+	1/250 = (1/(48.000.000/40)) * 4800
 
 	=> PDB0_MOD:  4800
 	=> PRESCALAR: 1
-	=> MULT:	  1
+	=> MULT:	  40
  */
 #define PDB_PERIOD 4800
 
 /*
-	PDB_SC_TRGSEL(15)        Select software trigger
-	PDB_SC_PDBEN             PDB enable
-	PDB_SC_PDBIE             Interrupt enable
-	PDB_SC_CONT              Continuous mode
+	PDB_SC_TRGSEL(15)        Enable software trigger.
+	PDB_SC_PDBEN             Enable PDB.
+	PDB_SC_PDBIE             Enable PDB interrupt.
+	PDB_SC_CONT              Run the PDB in continous mode.
 	PDB_SC_PRESCALER(0)      Prescaler = 1
 	PDB_SC_MULT(0)           Prescaler multiplication factor = 1
 */
 #define PDB_CONFIG (PDB_SC_TRGSEL(15) | PDB_SC_PDBEN | PDB_SC_PDBIE \
-	| PDB_SC_CONT | PDB_SC_PRESCALER(0) | PDB_SC_MULT(0))
+	| PDB_SC_CONT | PDB_SC_PRESCALER(0) | PDB_SC_MULT(3) | PDB_SC_LDOK)
+
+#define PDB_CH0C1_TOS 0x0100
+#define PDB_CH0C1_EN 0x01
 
 void pdbInit() {
-	pinMode(13, OUTPUT);
-
-	// Enable PDB clock
+	// Enable PDB clock.
 	SIM_SCGC6 |= SIM_SCGC6_PDB;
-	// Timer period
+
+	// Set timer period.
 	PDB0_MOD = PDB_PERIOD;
-	// Interrupt delay
+
+	// We want 0 interrupt delay.
 	PDB0_IDLY = 0;
-	// Enable pre-trigger
+
+	// Enable pre-trigger.
 	PDB0_CH0C1 = PDB_CH0C1_TOS | PDB_CH0C1_EN;
-	// PDB0_CH0DLY0 = 0;
-	PDB0_SC = PDB_CONFIG | PDB_SC_LDOK;
-	// Software trigger (reset and restart counter)
+
+	// Setup configuration.
+	PDB0_SC = PDB_CONFIG;
+
+	// Software trigger (reset and restart counter).
 	PDB0_SC |= PDB_SC_SWTRIG;
-	// Enable interrupt request
-	//NVIC_ENABLE_IRQ(IRQ_PDB);
-}
 
-void dmaInit() {
-	// Enable DMA, DMAMUX clocks
-	SIM_SCGC7 |= SIM_SCGC7_DMA;
-	SIM_SCGC6 |= SIM_SCGC6_DMAMUX;
-
-	// Use default configuration
-	DMA_CR = 0;
-
-	// Source address
-	DMA_TCD1_SADDR = &ADC0_RA;
-	// Don't change source address
-	DMA_TCD1_SOFF = 0;
-	DMA_TCD1_SLAST = 0;
-	// Destination address
-	DMA_TCD1_DADDR = samples;
-	// Destination offset (2 byte)
-	DMA_TCD1_DOFF = 2;
-	// Restore destination address after major loop
-	DMA_TCD1_DLASTSGA = -sizeof(samples);
-	// Source and destination size 16 bit
-	DMA_TCD1_ATTR = DMA_TCD_ATTR_SSIZE(1) | DMA_TCD_ATTR_DSIZE(1);
-	// Number of bytes to transfer (in each service request)
-	DMA_TCD1_NBYTES_MLNO = 2;
-	// Set loop counts
-	DMA_TCD1_CITER_ELINKNO = sizeof(samples) / 2;
-	DMA_TCD1_BITER_ELINKNO = sizeof(samples) / 2;
-	// Enable interrupt (end-of-major loop)
-	DMA_TCD1_CSR = DMA_TCD_CSR_INTMAJOR;
-
-	// Set ADC as source (CH 1), enable DMA MUX
-	DMAMUX0_CHCFG1 = DMAMUX_DISABLE;
-	DMAMUX0_CHCFG1 = DMAMUX_SOURCE_ADC0 | DMAMUX_ENABLE;
-
-	// Enable request input signal for channel 1
-	DMA_SERQ = 1;
-
-	// Enable interrupt request
-	NVIC_ENABLE_IRQ(IRQ_DMA_CH1);
-}
-
-
-void adc0_isr() {
-	Serial.print("adc isr: ");
-	Serial.println(millis());
-	for (uint16_t i = 0; i < 16; i++) {
-		if (i != 0) Serial.print(", ");
-		Serial.print(samples[i]);
-	}
-	Serial.println(" ");
-}
-
-void pdb_isr() {
-	Serial.print("pdb isr: ");
-	Serial.println(millis());
-	digitalWrite(13, (ledOn = !ledOn));
-	// Clear interrupt flag
-	PDB0_SC &= ~PDB_SC_PDBIF;
-}
-
-void dma_ch1_isr() {
-	// Clear interrupt request for channel 1
-	DMA_CINT = 1;
+	// Enable interrupt request.
+	NVIC_ENABLE_IRQ(IRQ_PDB);
 }
