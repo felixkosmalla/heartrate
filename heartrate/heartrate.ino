@@ -9,14 +9,20 @@
 
 void setup()
 {
+	// Initialize serial port with baud rate 9600bips.
+    Serial.begin(9600);
+    while (!Serial) {}
+
+    Serial.println("test");
+
 	// setup the heart rate signale aquision
 	signal_setup();
 
 	// setup the heart rate display
-    graphics_setup();
+    //graphics_setup();
 }
 
 void loop()
 {
-    graphics_loop();
+    //graphics_loop();
 }

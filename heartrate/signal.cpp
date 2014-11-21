@@ -8,8 +8,17 @@ void pdbInit(void);
 
 void signal_setup()
 {
-	adcInit();
-	pdbInit();
+
+	/**
+	 * Debug purpose only
+	 */
+	pinMode(A9, OUTPUT);
+	analogWriteResolution(12); // Use full DAC resolution; same as our ADC input
+
+	Serial.print("Setup ADC...");
+	adcInit(); Serial.println("ok");
+	Serial.print("Setup PDB...");
+	pdbInit(); Serial.println("ok");
 }
 
 static const size_t SAMPLES_PER_SECOND = 250;
@@ -19,6 +28,8 @@ volatile uint16_t buffer[SAMPLES_PER_SECOND*MEASURE_DURATION];
 // ADC interrupt routine
 void adc0_isr() {
 	uint16_t val = ADC0_RA;
+	analogWrite(A9,val);
+	Serial.println("test");
 }
 
 // The datasheet says ADC clock should be 1 to 18 MHz for 8-12 bit mode.
@@ -56,7 +67,7 @@ void adcInit() {
 
 	// Differential mode off, we want only single-ended 12-bit values
 	// Select input channel A0 and enable the ADC interrupt.
-	ADC0_SC1A = ADC_SC1_AIEN | 0;
+	ADC0_SC1A = ADC_SC1_AIEN | 5;
 	NVIC_ENABLE_IRQ(IRQ_ADC0);
 }
 
@@ -104,7 +115,7 @@ void adcCalibrate() {
 	PDB_SC_MULT(0)           Prescaler multiplication factor = 1
 */
 #define PDB_CONFIG (PDB_SC_TRGSEL(15) | PDB_SC_PDBEN | PDB_SC_PDBIE \
-	| PDB_SC_CONT | PDB_SC_PRESCALER(0) | PDB_SC_MULT(3) | PDB_SC_LDOK)
+	| PDB_SC_CONT | PDB_SC_PRESCALER(0) | PDB_SC_MULT(3))
 
 #define PDB_CH0C1_TOS 0x0100
 #define PDB_CH0C1_EN 0x01
@@ -113,21 +124,35 @@ void pdbInit() {
 	// Enable PDB clock.
 	SIM_SCGC6 |= SIM_SCGC6_PDB;
 
+	Serial.println("pdb1");
+
 	// Set timer period.
 	PDB0_MOD = PDB_PERIOD;
+
+	Serial.println("pdb2");
 
 	// We want 0 interrupt delay.
 	PDB0_IDLY = 0;
 
+	Serial.println("pdb3");
+
 	// Enable pre-trigger.
 	PDB0_CH0C1 = PDB_CH0C1_TOS | PDB_CH0C1_EN;
 
+	Serial.println("pdb4");
+
 	// Setup configuration.
-	PDB0_SC = PDB_CONFIG;
+	PDB0_SC = PDB_CONFIG | PDB_SC_LDOK;
+
+	Serial.println("pdb5");
 
 	// Software trigger (reset and restart counter).
 	PDB0_SC |= PDB_SC_SWTRIG;
 
+	Serial.println("pdb6");
+
 	// Enable interrupt request.
 	NVIC_ENABLE_IRQ(IRQ_PDB);
+
+	Serial.println("pdb7");
 }
