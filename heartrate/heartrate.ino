@@ -88,21 +88,15 @@ static void heart_rate_acquisition_setup (void)
 
     // Initialize the Analog-To-Digital converter.
     #ifdef DEBUG
-	   cout << pstr("Initializing ADC...");
+	   cout << pstr("Initializing ADC.") << endl;
     #endif
 	adcInit();
-    #ifdef DEBUG
-        cout << pstr("done") << endl;
-    #endif
 
     // Initialize the Programmable Delay Block.
     #ifdef DEBUG
-	   cout << pstr("Initializing PDB...");
+	   cout << pstr("Initializing PDB.") << endl;
     #endif
 	pdbInit();
-    #ifdef DEBUG
-        cout << pstr("done") << endl;
-    #endif
 }
 
 /**
@@ -197,12 +191,12 @@ void adc0_isr (void)
      * by a 32-slots hardware averager. */
 	addToMovingAverageBuffer(ma_buf, heart_rate_signal_raw);
 	heart_rate_signal_filtered = getAverage(ma_buf);
-
-
     //heart_rate_signal_filtered = bandpass_filter(heart_rate_signal_raw);
-	//analogWrite(A9,getAverage(ma_buf));
-	//analogWrite(A9,heart_rate_signal_raw);
-	//cout << pstr("IIR: ") << heart_rate_signal_filtered << endl;
+    
+    #ifdef DEBUG
+    	//analogWrite(A9,getAverage(ma_buf));
+    	analogWrite(A9, heart_rate_signal_filtered);
+    #endif
     
     /* Set interrupt flag to notify the main loop that a new
      * ADC sample is ready to be processed. */ 
@@ -322,7 +316,7 @@ static void pdbInit (void)
 ///////////////////////////////////////////////////////////////////////////
 
 // The button is wired to pin 1 of the Teensy.
-static const int BUTTON = 1;
+static const int BUTTON = A1;
 
 // State variables used for the debouncing of the button state.
 static long lastDebounceTime = 0;
@@ -390,9 +384,6 @@ static SdFat sd;
 // The current log file that stores the measured heart rate data.
 static SdFile log_file;
 
- // Next column to be written be logging samples. 
-static uint8_t col = 0;
-
 // Forward declarations.
 static void createLogFile (void);
 static void writeSampleToLogFile (uint16_t val);
@@ -408,14 +399,14 @@ static void createLogFile (void)
      * get closed before creating a new one. */
     closeLogFile ();
 
-    // Seek for a not yet used log file name we can use; try 'LOG1.CSV' first.
-    String str_log_file = "LOG1.CSV";
+    // Seek for a not yet used log file name we can use; try 'ECG_1.CSV' first.
+    String str_log_file = "ECG_1.CSV";
     char buf[16];
     int log_nr = 1; // Log file number.
     str_log_file.toCharArray(buf, 16);
     while (sd.exists(buf)) {
         log_nr += 1;
-        str_log_file = "LOG" + String(log_nr) + ".CSV";
+        str_log_file = "ECG_" + String(log_nr) + ".CSV";
         str_log_file.toCharArray(buf, 16);
     }
     /* A not yet used log file name was found.
@@ -429,9 +420,6 @@ static void createLogFile (void)
     log_file.printf("MFSFK%d, %d\n", log_nr, SAMPLING_RATE);
     // Make the log persistent.
     log_file.sync();
-
-    // When writting samples into the log file, we begin at the first column.
-    col = 0;
 }
 
 /**
@@ -442,40 +430,45 @@ static void closeLogFile (void)
 	/* Write the End-of file mark 'EOF', flush the write buffer
 	 * and finally close the current log file. */ 
 	if (log_file.isOpen()) {
-        // In case the first column is not selected, skip over to next line.
-        if (col % 8 != 0) {
-            log_file.print(PSTR("\n"));
-        }
-        log_file.print(PSTR("EOF"));
+        log_file.print(PSTR("\nEOF"));
 		log_file.sync();
 		log_file.close();
     }
 }
 
 /**
- * Writes a given sample to the currently opened log file.
- *
- * @param sample Sample value in range of [0..4095].
+ * Writes all acquired samples to the currently opened log file.
  */
-static void writeSampleToLogFile (uint16_t sample)
+static void writeSamplesToLogFile (void)
 {
     ASSERT (log_file.isOpen());
-	ASSERT (0 <= sample <= 4095);
-    ASSERT (0 <= col <= 7);
 
-    // Write the given sample to the current log file.
-    log_file.print(sample);
+    // Next column to be written in log file. 
+    uint8_t col = 0;
 
-    /* After the last column we break up the current row
-     * and switch to the first column of the next row. */
-	if (col == 7) {
-        log_file.print("\n");
-        col = 0;
-    /* Otherwise, we add a comma-separator and 
-     * switch to the next column. */
-	} else {
-        log_file.print(", ");
-        ++col;
+    for (size_t i = 0; i < measure_index; ++i) {
+
+        /* Before we write to the first column, break up
+         * the current row and switch to the next one as
+         * long as it is not the first sample we are going
+         * to write. */
+        if (col == 0) {
+            if (i != 0) {
+                log_file.print("\n");
+            }
+        /* Otherwise, we add a comma-separator and 
+         * switch to the next column. */
+        } else {
+            log_file.print(", ");
+        }
+
+        // Write the next sample to the log file.
+        uint16_t sample = measurement_buffer[i];
+        ASSERT (0 <= sample <= 4095);
+        log_file.print(sample); 
+
+        // Switch to next column.
+        col = (col + 1) % 8;
     }
 }
 
@@ -614,37 +607,36 @@ static void graphics_loop()
 
 void setup (void)
 {
-   // Initialize serial port with baud rate 115200bips.
-    Serial.begin(115200);
-
-    // DEBUG-only: Wait until serial monitor is openend.
     #ifdef DEBUG
-      while (!Serial) {}
+        // Initialize serial port with baud rate 115200bips.
+        Serial.begin(115200);
+        // Wait until serial monitor is openend.
+        while (!Serial) {}       
+        // Small delay to ensure the serial port is initialized.
+        delay(200);
     #endif
 
-    // Small delay to ensure the serial port is initialized.
-    delay(200);
-
     #ifdef DEBUG
-      cout << pstr("Initializing Button...");
+        cout << pstr("Initializing Button...");
     #endif
     /* Setup button to start and abort a heart rate measurement.
      * Enable the internal pull-up resistor of the pin connected with the button. */
     pinMode(BUTTON, INPUT_PULLUP);
     #ifdef DEBUG
-      cout << pstr("done") << endl;
+        cout << pstr("done") << endl;
     #endif
 
     // Initialize the TFT display.
     #ifdef DEBUG
-      cout << pstr("Initializing the Heart Rate Monitor...");
+        cout << pstr("Initializing TFT...");
     #endif
+    tft.begin();
+    tft.fillScreen(ILI9341_WHITE);
+    tft.setRotation(3);
 
-    // Setup the TFT display.
     graphics_setup();
-
     #ifdef DEBUG
-      cout << pstr("done") << endl;
+        cout << pstr("done") << endl;
     #endif
 
     /* Initialize SD card or print a detailed error message and halt.
@@ -654,7 +646,7 @@ void setup (void)
      * We do so since the communcation was unreliable with fullspeed.
      * Probably the rudimentary wiring over the breadboard is the problem. */
     #ifdef DEBUG
-      cout << pstr("Initializing SD Card...");
+        cout << pstr("Initializing SD Card...");
     #endif
 
     /* Make sure the TFT does not affect the shared SPI bus
@@ -662,14 +654,14 @@ void setup (void)
     digitalWrite(TFT_CS, HIGH);
 
     if (!sd.begin(SD_CS, SPI_HALF_SPEED))
-      sd.initErrorHalt();
+        sd.initErrorHalt();
 
     /* Now, both TFT screen and SD card are ready to communicate with
      * the Teensy. Set chip select port of the TFT to LOW, such that
      * the SPI library can drive the pin correctly. */
     digitalWrite(TFT_CS, LOW);
     #ifdef DEBUG
-      cout << pstr("done") << endl;
+        cout << pstr("done") << endl;
     #endif
 
     // Setup the heart rate signal acquisition.
@@ -691,9 +683,7 @@ void finalize(void)
     createLogFile();
 
     // Write all the samples acquired until now into the log file.
-    for (size_t i = 0; i < measure_index; ++i) {
-        writeSampleToLogFile(measurement_buffer[i]);     
-    }
+    writeSamplesToLogFile();
 
     // Close the log file.
     closeLogFile();
