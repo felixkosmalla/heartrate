@@ -492,14 +492,114 @@ static const int TFT_DC = 9;
 // The ILI9341 TFT display.
 static ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC);
 
-static void graphics_setup ()
+// Dimensions of the display
+#define SCREEN_WIDTH 320
+#define SCREEN_HEIGHT 240
+#define GRAPH_COLOR 111111 // TODO SET THIS
+
+/*
+// Used to run graphics more smoothly
+int[] graphics_buffer = new int[SCREEN_WIDTH*SCREEN_HEIGHT]
+
+// Indicated if 
+bool[] changed_x = new bool[SCREEN_WIDTH];
+bool[] changed_y = new bool[SCREEN_HEIGHT];
+*/
+
+// defines the number of readings / pixels that should be omitted
+#define READING_GAP 20
+
+// screen buffer
+uint16_t previous_values[SCREEN_WIDTH];
+
+// color buffer. used to redraw the pixel
+uint16_t previous_colors[SCREEN_WIDTH];
+
+// current position
+int cur_pos = 0;
+
+int draw_delay = 20;
+
+int last_millis = 0;
+
+
+static void draw_grid(){
+    // TODO
+}
+
+static int get_reading_y(){
+    // TODO
+
+    return 100;
+}
+
+static int get_previous_color(int pos){
+    // TODO
+
+    return -1;
+}
+
+
+static void draw_reading(){
+
+
+
+    // erase the oldest X readings
+    for(int i = cur_pos; i < READING_GAP +cur_pos; i++){
+        // actual position, mod
+        int imod = i % SCREEN_WIDTH;
+
+        // read from the previous_buffer
+        uint16_t pre_col = previous_colors[imod];
+
+        if(pre_col != -1){
+            // get the y position
+            int y = previous_values[imod];
+
+            // erase pixel
+            drawPixel(imod, y, pre_col);
+
+        }
+        
+    }
+
+    // get the new reading
+    int reading = get_reading_y();
+    previous_values[cur_pos] = reading;
+
+    // save the current color
+    previous_colors[cur_pos] = get_previous_color(cur_pos);
+        
+    // and draw the actual pixel
+    drawPixel(cur_pos, reading, GRAPH_COLOR);
+
+
+    // do one step
+    cur_pos++;
+
+    // and wrap around if necessary
+    cur_pos = cur_pos % SCREEN_WIDTH;
+}
+
+static void graphics_setup()
 {
-	//TODO
+	for(int i = 0; i < SCREEN_WIDTH; i++){
+        previous_values[i] = -1;
+        previous_colors[i] = -1;
+    }
+
+    draw_grid();
+
 }
 
 static void graphics_loop()
 {
-	//TODO
+
+    if(last_millis + draw_delay < millis()){
+        draw_reading();
+        last_millis = millis();
+    }
+    
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -571,7 +671,7 @@ void setup (void)
 }
 
 /**
- * Resets the heart rate measurement.
+ * Finalizes the heart rate measurement.
  */
 void finalize(void)
 {
