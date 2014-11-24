@@ -1,3 +1,20 @@
+/*************************************************************************
+ *  CSE466 - Final Project "Teensy 3.1 powered Heart Rate Monitor"       *
+ *                                                                       *
+ * Authors: Max-Ferdinand Gerhard Suffel (1427741)                       *
+ *          Felix Kosmalla (1430813)                                     *
+ *                                                                       *
+ *  Third-party code used:                                               *
+ *                                                                       *
+ *  + Button debounce code: http://arduino.cc/en/Tutorial/Debounce.      *
+ *  + SdFat library code from William Greiman.                           *
+ *************************************************************************/
+
+///////////////////////////////////////////////////////////////////////////
+//                                LIBRARIES                              //
+///////////////////////////////////////////////////////////////////////////
+
+#include <assert.h>
 #include "SPI.h"          /* SPI library is used to communicate with the
                            * ILI9341_t3 display and the SD card reader. */
 #include <SdFat.h>        // SdFat library is used to access the SD card.
@@ -5,43 +22,111 @@
 #include <ILI9341_t3.h>   // ILI9341_t3 library defines the display functions.
 
 ///////////////////////////////////////////////////////////////////////////
-//                          HEART RATE SIGNAL PROCESSING                 //
+//                                DEBUG                                  //
 ///////////////////////////////////////////////////////////////////////////
+
+#define DEBUG // Uncomment to generate debug output on the serial port.
+
+#ifdef DEBUG
+    // Serial monitor output stream.
+    static ArduinoOutStream cout(Serial);
+
+    // Assertion Macro
+    // Adopted version from http://www.acm.uiuc.edu/sigops/roll_your_own/2.a.html
+    static void ASSERT_FAILURE(const char *exp, const char *file, 
+        const char *function, int line)
+    {
+        cout << pstr("Assertion failed at ") << file << pstr(":")
+             << line << pstr(" in function ") << function << endl;
+        cout << pstr("Condition: ") << exp; 
+        while (true) {} // halt
+    } 
+
+    #define ASSERT(exp)  if ((exp)) ; \
+            else ASSERT_FAILURE(#exp, __FILE__, __FUNCTION__, __LINE__);
+#else
+    #define ASSERT(exp)
+#endif
+
+///////////////////////////////////////////////////////////////////////////
+//                       HEART RATE SIGNAL PROCESSING                    //
+///////////////////////////////////////////////////////////////////////////
+
+/* States whether a measurement of the heart rate is currently running.
+ *
+ * On startup there is no measurement running (i.e. measurement_running is false).
+ * One has to press the button in order to start a new meaurement of the
+ * heart rate or to abort a currently running measurement. */
+static bool measurement_running = false;
+
+static const size_t SAMPLING_RATE = 250;        // 250Hz
+static const size_t MEASURE_DURATION = 30;      // 30sec
+
+// Buffer holds 30sec * 250Hz samples obtained during a measurement.
+static size_t measure_index = 0;
+static const size_t MEASUREMENT_SIZE = SAMPLING_RATE*MEASURE_DURATION;
+static uint16_t measurement_buffer[MEASUREMENT_SIZE];
+
+// The latest acquired raw and filtered sample of the heart rate signal.
+static volatile uint16_t heart_rate_signal_raw;
+static volatile uint16_t heart_rate_signal_filtered;
 
 // Forward declarations.
 static void adcInit(void);
 static void adcCalibrate(void);
 static void pdbInit(void);
 
-static void signal_setup()
+static void heart_rate_acquisition_setup (void)
 {
 	/**
 	 * Debug purpose only
 	 */
-	analogWriteResolution(12); // Use full DAC resolution; same as our ADC input
+    #ifdef DEBUG
+       // Use full DAC resolution; same as our ADC input.
+	   analogWriteResolution(12);
+    #endif
 
-	Serial.print("Setup ADC...");
-	adcInit(); Serial.println("ok");
-	Serial.print("Setup PDB...");
-	pdbInit(); Serial.println("ok");
+    // Initialize the Analog-To-Digital converter.
+    #ifdef DEBUG
+	   cout << pstr("Initializing ADC...");
+    #endif
+	adcInit();
+    #ifdef DEBUG
+        cout << pstr("done") << endl;
+    #endif
+
+    // Initialize the Programmable Delay Block.
+    #ifdef DEBUG
+	   cout << pstr("Initializing PDB...");
+    #endif
+	pdbInit();
+    #ifdef DEBUG
+        cout << pstr("done") << endl;
+    #endif
 }
 
-static const size_t SAMPLES_PER_SECOND = 250;
-static const size_t MEASURE_DURATION = 30; // 30sec
-volatile uint16_t buffer[SAMPLES_PER_SECOND*MEASURE_DURATION];
-volatile uint16_t heart_rate_signal_raw;
-volatile uint16_t heart_rate_signal_filtered;
-
 /**
- * Returns the latest sample of the heart rate signal.
+ * Returns the latest sample of the raw heart rate signal.
  * @return Raw heart rate sample in range [0..4095]
  */
-inline static float getLatestRawHeartRateSample(void)
+inline static float getLatestRawHeartRateSample (void)
 {
-	disable_irq();
+	noInterrupts(); // Disable interrupt.
 	float heart_rate = heart_rate_signal_raw;
-	enable_irq();
+	interrupts();   // Enable interrupt again.
 	return heart_rate;
+}
+
+/**
+ * Returns the latest sample of the filtered heart rate signal.
+ * @return Filtered heart rate sample in range [0..4095]
+ */
+inline static float getLatestFilteredHeartRateSample (void)
+{
+    noInterrupts(); // Disable interrupt.
+    float heart_rate = heart_rate_signal_filtered;
+    interrupts();   // Enable interrupt again.
+    return heart_rate;
 }
 
 /* Digital filter designed by mkfilter/mkshape/gencode   A.J. Fisher
@@ -53,7 +138,7 @@ inline static float getLatestRawHeartRateSample(void)
 
 static float xv[NZEROS+1], yv[NPOLES+1];
 
-static float bandpass_filter(float input)
+static float bandpass_filter (float input)
 { 		
 	xv[0] = xv[1]; xv[1] = xv[2]; xv[2] = xv[3]; xv[3] = xv[4]; 
     xv[4] = input / GAIN;
@@ -93,19 +178,35 @@ float getAverage (struct MovingAverageBuffer &m) {
    return sum/((float)BUF_SIZE);
 }
 
-// ADC interrupt routine.
-void adc0_isr()
+/* ADC interrupt routine.
+ * 
+ * Each time the ADC triggers an interrupt the interrupt service
+ * routine adc0_isr is called. Then, the latest ADC sample is
+ * acquiered, filtered, and a boolean flag adcInterrupt is set. */ 
+static volatile bool adcInterrupt = false;
+void adc0_isr (void)
 {
-	// The raw heart rate signal is low-pass-filtered
-	// by a 32-slots hardware averager.
+	// Acquiere the latest raw sample from the ADC.
 	heart_rate_signal_raw = ADC0_RA; // 2 bytes
-	Serial.print("RAW: "); Serial.println(heart_rate_signal_raw);
-	//heart_rate_signal_filtered = bandpass_filter(heart_rate_signal_raw);
+
+    #ifdef DEBUG
+	   cout << pstr("RAW: ") << heart_rate_signal_raw << endl;
+    #endif
+    
+    /* The raw heart rate signal is low-pass-filtered
+     * by a 32-slots hardware averager. */
 	addToMovingAverageBuffer(ma_buf, heart_rate_signal_raw);
 	heart_rate_signal_filtered = getAverage(ma_buf);
+
+
+    //heart_rate_signal_filtered = bandpass_filter(heart_rate_signal_raw);
 	//analogWrite(A9,getAverage(ma_buf));
 	//analogWrite(A9,heart_rate_signal_raw);
-	//Serial.print("IIR: "); Serial.println(heart_rate_signal_filtered);
+	//cout << pstr("IIR: ") << heart_rate_signal_filtered << endl;
+    
+    /* Set interrupt flag to notify the main loop that a new
+     * ADC sample is ready to be processed. */ 
+    adcInterrupt = true;
 }
 
 // We want the single-ended 12-bit resolution mode, that is, ADC_CFG1_ADICLK(1).
@@ -121,7 +222,7 @@ void adc0_isr()
 // that is, ADC_CFG2_ADLSTS(2). We may return to default if values are too bad.
 #define ADC_CONFIG2 (ADC_CFG2_MUXSEL | ADC_CFG2_ADLSTS(3))
 
-static void adcInit()
+static void adcInit (void)
 {
 	ADC0_CFG1 = ADC_CONFIG1;
 	ADC0_CFG2 = ADC_CONFIG2;
@@ -145,7 +246,7 @@ static void adcInit()
 	NVIC_ENABLE_IRQ(IRQ_ADC0);
 }
 
-static void adcCalibrate() 
+static void adcCalibrate (void) 
 {
 	uint16_t sum;
 
@@ -195,7 +296,7 @@ static void adcCalibrate()
 #define PDB_CH0C1_TOS 0x0100
 #define PDB_CH0C1_EN 0x01
 
-static void pdbInit() 
+static void pdbInit (void) 
 {
 	// Enable PDB clock.
 	SIM_SCGC6 |= SIM_SCGC6_PDB;
@@ -217,6 +318,168 @@ static void pdbInit()
 }
 
 ///////////////////////////////////////////////////////////////////////////
+//                           BUTTON (with DEBOUNCING)                    //
+///////////////////////////////////////////////////////////////////////////
+
+// The button is wired to pin 1 of the Teensy.
+static const int BUTTON = 1;
+
+// State variables used for the debouncing of the button state.
+static long lastDebounceTime = 0;
+static const long DEBOUNCE_DELAY = 30;
+static int lastButtonState = HIGH;
+
+/* The current state of the button.
+ * On startup it is assumed not to be pressed. */
+static int buttonState = 0;
+
+/**
+ * Checks whether the button was pressed.
+ *
+ * The function is called in each iteration of the main loop in order to
+ * debounce the button. For this purpose, the debounce algorithm from the
+ * Arduino Debounce Tutorial is used: http://arduino.cc/en/Tutorial/Debounce.
+ *
+ * @return true if the button was pressed, otherwise false
+ */
+static bool wasButtonPressed (void)
+{
+    // Current reading of the button state.
+    int reading = digitalRead(BUTTON);
+
+    if (reading != lastButtonState) {
+        // Reset the debouncing timer.
+        lastDebounceTime = millis();
+    }
+
+    if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+        /* Whatever the reading is at, it's been there for longer
+         * than the debounce delay, so take it as the actual current state: */
+
+        // If the button state has changed:
+        if (reading != buttonState) {
+            buttonState = reading;
+
+            /* The button was pressed in case the button state had become LOW.
+             * Note: The button is connected to an internal pull-up resistor,
+             *       thus, the logic is inverted. */
+            if (buttonState == LOW) {
+                return true;
+            }
+        }
+    }
+
+    /* Save the reading.
+     * Next time through the loop, it'll be the lastButtonState: */
+    lastButtonState = reading;
+
+    // The button was not pressed.
+    return false;
+}
+
+///////////////////////////////////////////////////////////////////////////
+//                               SD CARD                                 //
+///////////////////////////////////////////////////////////////////////////
+
+// The SPI chip-select for the SD card reader is 6 (pin 6 of the Teensy).
+static const int SD_CS = 6;
+
+// The SD card partitioned with a FAT filesystem.
+static SdFat sd;
+
+// The current log file that stores the measured heart rate data.
+static SdFile log_file;
+
+ // Next column to be written be logging samples. 
+static uint8_t col = 0;
+
+// Forward declarations.
+static void createLogFile (void);
+static void writeSampleToLogFile (uint16_t val);
+static void closeLogFile (void);
+
+/**
+ * Creates a new log file on the SD card.
+ * Does not return in case an error happened.
+ */
+static void createLogFile (void)
+{
+    /* First make sure the current log file
+     * get closed before creating a new one. */
+    closeLogFile ();
+
+    // Seek for a not yet used log file name we can use; try 'LOG1.CSV' first.
+    String str_log_file = "LOG1.CSV";
+    char buf[16];
+    int log_nr = 1; // Log file number.
+    str_log_file.toCharArray(buf, 16);
+    while (sd.exists(buf)) {
+        log_nr += 1;
+        str_log_file = "LOG" + String(log_nr) + ".CSV";
+        str_log_file.toCharArray(buf, 16);
+    }
+    /* A not yet used log file name was found.
+     * Create the log with write permissions. */
+    if (!log_file.open(str_log_file.c_str(), O_WRITE | O_CREAT)) {
+        // Some critical error happened, halt the program.
+        sd.errorHalt_P(PSTR("Cannot create log file"));
+    }
+
+    // Write log file header.
+    log_file.printf("MFSFK%d, %d\n", log_nr, SAMPLING_RATE);
+    // Make the log persistent.
+    log_file.sync();
+
+    // When writting samples into the log file, we begin at the first column.
+    col = 0;
+}
+
+/**
+ * Closes the currenlty opened log file on the SD card.
+ */
+static void closeLogFile (void)
+{
+	/* Write the End-of file mark 'EOF', flush the write buffer
+	 * and finally close the current log file. */ 
+	if (log_file.isOpen()) {
+        // In case the first column is not selected, skip over to next line.
+        if (col % 8 != 0) {
+            log_file.print(PSTR("\n"));
+        }
+        log_file.print(PSTR("EOF"));
+		log_file.sync();
+		log_file.close();
+    }
+}
+
+/**
+ * Writes a given sample to the currently opened log file.
+ *
+ * @param sample Sample value in range of [0..4095].
+ */
+static void writeSampleToLogFile (uint16_t sample)
+{
+    ASSERT (log_file.isOpen());
+	ASSERT (0 <= sample <= 4095);
+    ASSERT (0 <= col <= 7);
+
+    // Write the given sample to the current log file.
+    log_file.print(sample);
+
+    /* After the last column we break up the current row
+     * and switch to the first column of the next row. */
+	if (col == 7) {
+        log_file.print("\n");
+        col = 0;
+    /* Otherwise, we add a comma-separator and 
+     * switch to the next column. */
+	} else {
+        log_file.print(", ");
+        ++col;
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////
 //                               GRAPHICS                                //
 ///////////////////////////////////////////////////////////////////////////
 
@@ -227,9 +490,9 @@ static const int TFT_CS = 10;
 static const int TFT_DC = 9;
 
 // The ILI9341 TFT display.
-ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC);
+static ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC);
 
-static void graphics_setup()
+static void graphics_setup ()
 {
 	//TODO
 }
@@ -243,25 +506,147 @@ static void graphics_loop()
 //                                   SETUP                               //
 ///////////////////////////////////////////////////////////////////////////
 
-void setup()
+void setup (void)
 {
-	// Initialize serial port with baud rate 9600bips.
-    Serial.begin(9600);
-    while (!Serial) {}
+   // Initialize serial port with baud rate 115200bips.
+    Serial.begin(115200);
+
+    // DEBUG-only: Wait until serial monitor is openend.
+    #ifdef DEBUG
+      while (!Serial) {}
+    #endif
+
+    // Small delay to ensure the serial port is initialized.
     delay(200);
 
-	// Setup the heart rate signale acquisition.
-	signal_setup();
+    #ifdef DEBUG
+      cout << pstr("Initializing Button...");
+    #endif
+    /* Setup button to start and abort a heart rate measurement.
+     * Enable the internal pull-up resistor of the pin connected with the button. */
+    pinMode(BUTTON, INPUT_PULLUP);
+    #ifdef DEBUG
+      cout << pstr("done") << endl;
+    #endif
 
-	// Setup the heart rate display.
+    // Initialize the TFT display.
+    #ifdef DEBUG
+      cout << pstr("Initializing the Heart Rate Monitor...");
+    #endif
+
+    // Setup the TFT display.
     graphics_setup();
+
+    #ifdef DEBUG
+      cout << pstr("done") << endl;
+    #endif
+
+    /* Initialize SD card or print a detailed error message and halt.
+     * We run the SPI communication with the SD card by half speed,
+     * that is, 15Mhz since the Teensy 3.1 can only run the SPI port
+     * with 30Mhz when the CPU is overclocked.
+     * We do so since the communcation was unreliable with fullspeed.
+     * Probably the rudimentary wiring over the breadboard is the problem. */
+    #ifdef DEBUG
+      cout << pstr("Initializing SD Card...");
+    #endif
+
+    /* Make sure the TFT does not affect the shared SPI bus
+     * during the initialization of the SD card reader. */
+    digitalWrite(TFT_CS, HIGH);
+
+    if (!sd.begin(SD_CS, SPI_HALF_SPEED))
+      sd.initErrorHalt();
+
+    /* Now, both TFT screen and SD card are ready to communicate with
+     * the Teensy. Set chip select port of the TFT to LOW, such that
+     * the SPI library can drive the pin correctly. */
+    digitalWrite(TFT_CS, LOW);
+    #ifdef DEBUG
+      cout << pstr("done") << endl;
+    #endif
+
+    // Setup the heart rate signal acquisition.
+	heart_rate_acquisition_setup();    
+}
+
+/**
+ * Resets the heart rate measurement.
+ */
+void finalize(void)
+{
+    // Clear the ADC IMU interrupts.
+    adcInterrupt = false;
+
+    // Reset the measurement of heart rate.
+    measurement_running = false;
+
+    // Create a new log file.
+    createLogFile();
+
+    // Write all the samples acquired until now into the log file.
+    for (size_t i = 0; i < measure_index; ++i) {
+        writeSampleToLogFile(measurement_buffer[i]);     
+    }
+
+    // Close the log file.
+    closeLogFile();
+
+    // Finally, forget all the acquired samples.
+    measure_index = 0;
 }
 
 ///////////////////////////////////////////////////////////////////////////
 //                                 MAIN LOOP                             //
 ///////////////////////////////////////////////////////////////////////////
 
-void loop()
+void loop (void)
 {
+    // Was the button pressed to either start or abort a measurement?
+    if(wasButtonPressed()) {
+
+        // Start a new measurement in case it is not running currently.
+        if (!measurement_running) {
+
+          // Claim the heart rate measurement as running.
+          measurement_running = true;
+
+        // Otherwise, abort the current heart rate measurement.
+        } else {
+          // Finalize the heart rate measurement.
+          finalize();
+        }
+    }
+
+    // Is a heart rate measurement currently running?
+    if (measurement_running) {
+
+        // Did there occur an ADC interrupt recently?
+        if (adcInterrupt) {
+
+            /* Clear the ADC interrupt flag.
+             * NOTE: The variable adcInterrupt is shared with the interrupt service routine adc0_isr.
+             *       However, we do not need to disable the interrupts temporarily since the variable
+             *       adcInterrupt is of boolean type; a bool occupies one single byte on the target
+             *       platform and it will be modified atomically in the single-core Freescale ARM CPU. */
+            adcInterrupt = false;
+
+            // Acquire the lastest filtered sample of the heart rate signal.
+            uint16_t sample = getLatestFilteredHeartRateSample ();
+
+            // Remember the sample in the next free slot of the measurement buffer.
+            ASSERT (0 <= measure_index < MEASUREMENT_SIZE);
+            measurement_buffer[measure_index] = sample;
+            ++measure_index;
+        }
+
+        // Did we acquire all samples of the current measurement?
+        if (measure_index == MEASUREMENT_SIZE) {
+            // Finalize the heart rate measurement.
+            finalize();
+        }
+    }
+
+    // Update the heart rate monitor.
     graphics_loop();
 }
