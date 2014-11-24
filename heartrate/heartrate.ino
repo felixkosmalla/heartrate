@@ -495,7 +495,7 @@ static ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC);
 // Dimensions of the display
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
-#define GRAPH_COLOR 111111 // TODO SET THIS
+#define GRAPH_COLOR 0xF800 // TODO SET THIS
 
 /*
 // Used to run graphics more smoothly
@@ -525,6 +525,8 @@ int last_millis = 0;
 
 static void draw_grid(){
     // TODO
+
+    tft.fillScreen(0xFFFF);
 }
 
 static int get_reading_y(){
@@ -536,7 +538,7 @@ static int get_reading_y(){
 static int get_previous_color(int pos){
     // TODO
 
-    return -1;
+    return 0xFFFF;
 }
 
 
@@ -557,7 +559,7 @@ static void draw_reading(){
             int y = previous_values[imod];
 
             // erase pixel
-            drawPixel(imod, y, pre_col);
+            tft.drawPixel((uint16_t) imod, (uint16_t)y, pre_col);
 
         }
         
@@ -571,7 +573,7 @@ static void draw_reading(){
     previous_colors[cur_pos] = get_previous_color(cur_pos);
         
     // and draw the actual pixel
-    drawPixel(cur_pos, reading, GRAPH_COLOR);
+    tft.drawPixel((uint16_t)cur_pos, (uint16_t)reading, GRAPH_COLOR);
 
 
     // do one step
@@ -583,6 +585,10 @@ static void draw_reading(){
 
 static void graphics_setup()
 {
+
+
+
+
 	for(int i = 0; i < SCREEN_WIDTH; i++){
         previous_values[i] = -1;
         previous_colors[i] = -1;
