@@ -18,8 +18,11 @@
 #include "SPI.h"          /* SPI library is used to communicate with the
                            * ILI9341_t3 display and the SD card reader. */
 #include <SdFat.h>        // SdFat library is used to access the SD card.
-#include <Adafruit_GFX.h> // Adafruit GFX library is used for the user interface.
-#include <ILI9341_t3.h>   // ILI9341_t3 library defines the display functions.
+//#include <Adafruit_GFX.h> // Adafruit GFX library is used for the user interface.
+//#include <ILI9341_t3.h>   // ILI9341_t3 library defines the display functions.
+#include "Adafruit_GFX.h"
+#include "Adafruit_ILI9341.h"
+
 
 ///////////////////////////////////////////////////////////////////////////
 //                                DEBUG                                  //
@@ -483,7 +486,7 @@ static const int TFT_CS = 10;
 static const int TFT_DC = 9;
 
 // The ILI9341 TFT display.
-static ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC);
+static Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
 
 // Dimensions of the display
 #define SCREEN_WIDTH 320
