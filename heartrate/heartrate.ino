@@ -27,7 +27,7 @@
 //                                DEBUG                                  //
 ///////////////////////////////////////////////////////////////////////////
 
-//#define DEBUG // Uncomment to generate debug output on the serial port.
+#define DEBUG // Uncomment to generate debug output on the serial port.
 
 #ifdef DEBUG
     // Serial monitor output stream.
@@ -54,12 +54,8 @@
 //                       HEART RATE SIGNAL PROCESSING                    //
 ///////////////////////////////////////////////////////////////////////////
 
-/* States whether a measurement of the heart rate is currently running.
- *
- * On startup there is no measurement running (i.e. measurement_running is false).
- * One has to press the button in order to start a new meaurement of the
- * heart rate or to abort a currently running measurement. */
-static bool measurement_running = false;
+typedef enum Status { STOPPED, STARTED, RUNNING };
+static Status status = STOPPED, old_status = RUNNING; // Heart rate monitor status.
 
 static const size_t SAMPLING_RATE = 250;        // 250Hz
 static const size_t MEASURE_DURATION = 30;      // 30sec
@@ -466,7 +462,7 @@ static void writeSamplesToLogFile (void)
 
         // Write the next sample to the log file.
         uint16_t sample = measurement_buffer[i];
-        ASSERT (0 <= sample <= 4095);
+        ASSERT ((0 <= sample) && (sample <= 4095));
         log_file.print(sample); 
 
         // Switch to next column.
@@ -478,23 +474,34 @@ static void writeSamplesToLogFile (void)
 //                           STABILIZATION                               //
 ///////////////////////////////////////////////////////////////////////////
 
-static const size_t STABILIZATION_BUFFER = 100;
-static int stab_buf_counter = 0;
-static uint16_t stabilizing_buffer[STABILIZATION_BUFFER];
-
 static bool is_stable = false;
 
-static bool was_stable = true;
-static int button_pressed_at = 0;
+static const size_t STAB_BUF_SIZE = 100;
+static uint16_t stabilizing_buffer[STAB_BUF_SIZE];
+static size_t stab_buf_i = 0;
+static size_t stab_buf_initialized = false;
+
+static void addToStabilizationBuffer(uint16_t sample)
+{
+    if (!stab_buf_initialized) {
+        for (size_t i = 0; i < STAB_BUF_SIZE; i++) {
+            stabilizing_buffer[i] = sample;
+        }
+        stab_buf_initialized = true;
+    } else {
+        stabilizing_buffer[stab_buf_i] = sample;
+        stab_buf_i = (stab_buf_i + 1) % STAB_BUF_SIZE;
+    }
+}
 
 static float mean (void)
 {  
     float sum = 0;
-    for (int i = 0; i < STABILIZATION_BUFFER; i++) {
+    for (int i = 0; i < STAB_BUF_SIZE; i++) {
         sum += stabilizing_buffer[i];
     }
 
-    return sum / STABILIZATION_BUFFER;
+    return sum / STAB_BUF_SIZE;
 }
 
 static uint32_t variance (void)
@@ -502,23 +509,46 @@ static uint32_t variance (void)
   float m = mean();
   float sum = 0;
 
-  for (int i = 0; i < STABILIZATION_BUFFER; i++) {
+  for (int i = 0; i < STAB_BUF_SIZE; i++) {
     sum += pow(stabilizing_buffer[i] - m, 2);
   }
 
-  return (uint32_t)(sqrt(sum / STABILIZATION_BUFFER) + 0.5f);
+  return sum / STAB_BUF_SIZE;
 }
 
-static bool stable (uint32_t stdDev)
+static long lastSignalStateTime = 0;
+static const long SIGNAL_STABILIZATION_DELAY = 200;
+static bool lastSignalState = false;
+static bool signalState = false;
+
+static bool isSignalStable (void)
 {
-  return stdDev < 400;
+    uint32_t stdDev = (uint32_t)(sqrt(variance()) + 0.5f);
+
+    bool signalReading = (250 <= stdDev) && (stdDev <= 350);
+
+    if (signalReading != lastSignalState) {
+        lastSignalStateTime = millis();
+    }
+
+    if ((millis() - lastSignalStateTime) > SIGNAL_STABILIZATION_DELAY) {
+
+        if (signalReading != signalState) {
+            signalState = signalReading;
+            return signalState;
+        }
+    }
+
+    lastSignalState = signalReading;
+
+    return false;
 }
 
 ///////////////////////////////////////////////////////////////////////////
 //                               GRAPHICS                                //
 ///////////////////////////////////////////////////////////////////////////
 
-uint16_t gfx_sample;
+static uint16_t gfx_sample;
 
 // The SPI chip-select for the ILI9341 TFT display is 10 (pin 10 of the Teensy).
 static const int TFT_CS = 10;
@@ -730,12 +760,18 @@ static void draw_status_bar (void)
     tft.setTextSize(2);
     tft.print("ECG Status:");
 
-    tft.fillRect(20+110+10, GRAPH_HEIGHT+10, 20+110+70, GRAPH_HEIGHT+20, BACKGROUND_COLOR);
+    if (old_status != status) {
+        old_status = status;
 
-    if (is_stable) {
-      tft.print("stable");  
-    }else{
-      tft.print("unstable");  
+        tft.fillRect(20+110+20, GRAPH_HEIGHT+10, 20+110+70, GRAPH_HEIGHT+20, BACKGROUND_COLOR);
+
+        if (status == STOPPED) {
+            tft.print("stopped");  
+        } else if (status == STARTED) {
+            tft.print("stabilizing");  
+        } else if (status == RUNNING) {
+            tft.print("running");  
+        }
     }
 }
 
@@ -756,10 +792,12 @@ static void graphics_setup (void)
 static int counter = 0;
 static void graphics_update (void)
 {
-    if (last_millis + DRAW_DELAY < millis()) {
-        counter++;        
-        draw_reading();
-        last_millis = millis();
+    if (status == RUNNING) {
+        if (last_millis + DRAW_DELAY < millis()) {
+            counter++;        
+            draw_reading();
+            last_millis = millis();
+        }
     }
 
     if (counter % 10 == 0) {
@@ -838,17 +876,20 @@ void finalize(void)
     // Clear the ADC IMU interrupts.
     adcInterrupt = false;
 
-    // Reset the measurement of heart rate.
-    measurement_running = false;
+    if (status == RUNNING) {
+        // Create a new log file.
+        createLogFile();
 
-    // Create a new log file.
-    createLogFile();
+        // Write all the samples acquired until now into the log file.
+        writeSamplesToLogFile();
 
-    // Write all the samples acquired until now into the log file.
-    writeSamplesToLogFile();
+        // Close the log file.
+        closeLogFile();
+    }
 
-    // Close the log file.
-    closeLogFile();
+    // Stop the measurement of heart rate.
+    old_status = status;
+    status = STOPPED;
 
     // Finally, forget all the acquired samples.
     measure_index = 0;
@@ -864,53 +905,65 @@ void loop (void)
     if(wasButtonPressed()) {
 
         // Start a new measurement in case it is not running currently.
-        if (!measurement_running) {
+        if (status == STOPPED) {
 
-          // Claim the heart rate measurement as running.
-          measurement_running = true;
+          // Claim the heart rate measurement shall start.
+          old_status = status;
+          status = STARTED;
 
         // Otherwise, abort the current heart rate measurement.
         } else {
-          // Finalize the heart rate measurement.
-          finalize();
+
+            // Finalize the heart rate measurement.
+            finalize();
         }
     }
 
-    // Is a heart rate measurement currently running?
-    if (measurement_running) {
+    if (status != STOPPED) {
 
         // Did there occur an ADC interrupt recently?
         if (adcInterrupt) {
 
-            /* Clear the ADC interrupt flag.
-             * NOTE: The variable adcInterrupt is shared with the interrupt service routine adc0_isr.
-             *       However, we do not need to disable the interrupts temporarily since the variable
-             *       adcInterrupt is of boolean type; a bool occupies one single byte on the target
-             *       platform and it will be modified atomically in the single-core Freescale ARM CPU. */
-            adcInterrupt = false;
+                /* Clear the ADC interrupt flag.
+                 * NOTE: The variable adcInterrupt is shared with the interrupt service routine adc0_isr.
+                 *       However, we do not need to disable the interrupts temporarily since the variable
+                 *       adcInterrupt is of boolean type; a bool occupies one single byte on the target
+                 *       platform and it will be modified atomically in the single-core Freescale ARM CPU. */
+                adcInterrupt = false;
 
-            // Acquire the lastest filtered sample of the heart rate signal.
-            uint16_t sample = getLatestFilteredHeartRateSample ();
-            gfx_sample = sample; // Tell graphics about new sample.
+                // Acquire the lastest filtered sample of the heart rate signal.
+                uint16_t sample = getLatestFilteredHeartRateSample ();
+                gfx_sample = sample; // Tell graphics about new sample.
 
-            // Remember the sample in the next free slot of the measurement buffer.
-            ASSERT (0 <= measure_index < MEASUREMENT_SIZE);
-            measurement_buffer[measure_index] = sample;
-            ++measure_index;
+                // Remember the sample in the next free slot of the measurement buffer.
+                ASSERT ((0 <= measure_index) && (measure_index < MEASUREMENT_SIZE));
+                measurement_buffer[measure_index] = sample;
+                ++measure_index;
 
-            // stabilizing_buffer[stab_buf_counter++] = sample;
-            // if (stab_buf_counter >= STABILIZATION_BUFFER) {
-            //     stab_buf_counter = 0;
-            // }
-
-            // uint32_t var = variance();
-            // is_stable = stable(var);
+                /* If the measurement was recently started, 
+                 * add the sample to the stabilization buffer. */
+                if (status == STARTED) {
+                    addToStabilizationBuffer (sample);
+                }
         }
 
-        // Did we acquire all samples of the current measurement?
-        if (measure_index == MEASUREMENT_SIZE) {
-            // Finalize the heart rate measurement.
-            finalize();
+        // Was a heart rate measurement recently started?
+        if (status == STARTED) {
+
+            // Is the signal already stable?
+            if (isSignalStable()) {
+                old_status = status;
+                status = RUNNING;
+            }
+
+        // Is a heart rate measurement currently running?
+        } else if (status == RUNNING) {
+
+            // Did we acquire all samples of the current measurement?
+            if (measure_index == MEASUREMENT_SIZE) {
+                // Finalize the heart rate measurement.
+                finalize();
+            }
         }
     }
 
