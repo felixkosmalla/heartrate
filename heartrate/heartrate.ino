@@ -22,7 +22,11 @@
 //#include <ILI9341_t3.h>   // ILI9341_t3 library defines the display functions.
 #include "Adafruit_GFX.h"
 #include "Adafruit_ILI9341.h"
+#include <math.h>
 
+
+static uint16_t var = 0;
+static bool is_stable = false;
 
 ///////////////////////////////////////////////////////////////////////////
 //                                DEBUG                                  //
@@ -30,9 +34,12 @@
 
 #define DEBUG // Uncomment to generate debug output on the serial port.
 
+static ArduinoOutStream cout(Serial);
+
+
 #ifdef DEBUG
     // Serial monitor output stream.
-    static ArduinoOutStream cout(Serial);
+    //static ArduinoOutStream cout(Serial);
 
     // Assertion Macro
     // Adopted version from http://www.acm.uiuc.edu/sigops/roll_your_own/2.a.html
@@ -187,7 +194,7 @@ void adc0_isr (void)
 	heart_rate_signal_raw = ADC0_RA; // 2 bytes
 
     #ifdef DEBUG
-	   cout << pstr("RAW: ") << heart_rate_signal_raw << endl;
+	   //cout << pstr("RAW: ") << heart_rate_signal_raw << endl;
     #endif
     
     /* The raw heart rate signal is low-pass-filtered
@@ -479,6 +486,8 @@ static void writeSamplesToLogFile (void)
 //                               GRAPHICS                                //
 ///////////////////////////////////////////////////////////////////////////
 
+uint16_t gfx_sample = -1;
+
 // The SPI chip-select for the ILI9341 TFT display is 10 (pin 10 of the Teensy).
 static const int TFT_CS = 10;
 
@@ -491,8 +500,9 @@ static Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
 // Dimensions of the display
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
-#define GRAPH_COLOR 0xF800 // TODO SET THIS
-
+#define GRAPH_COLOR ILI9341_YELLOW // TODO SET THIS
+#define LINE_COLOR ILI9341_RED
+#define BACKGROUND_COLOR ILI9341_BLACK
 /*
 // Used to run graphics more smoothly
 int[] graphics_buffer = new int[SCREEN_WIDTH*SCREEN_HEIGHT]
@@ -503,32 +513,120 @@ bool[] changed_y = new bool[SCREEN_HEIGHT];
 */
 
 // defines the number of readings / pixels that should be omitted
-#define READING_GAP 20
+#define READING_GAP 10
+
+#define VALUE_COUNT  107
+
+#define SQUARE_LENGTH 7
+#define GRAPH_HEIGHT 160
 
 // screen buffer
-uint16_t previous_values[SCREEN_WIDTH];
+int32_t previous_values[VALUE_COUNT];
 
 // color buffer. used to redraw the pixel
-uint16_t previous_colors[SCREEN_WIDTH];
+uint16_t previous_colors[VALUE_COUNT];
 
 // current position
 int cur_pos = 0;
 
-int draw_delay = 20;
+int draw_delay = 15;
 
 int last_millis = 0;
 
 
+
+
+static void draw_grid_temp(int from, int to){
+
+   tft.drawFastVLine(0, 0, GRAPH_HEIGHT, LINE_COLOR);
+
+
+  
+  for(int i = from; i < to; i++){
+
+      if(i % SQUARE_LENGTH == 0){
+        tft.drawFastVLine(i, 0, GRAPH_HEIGHT, LINE_COLOR);
+      }
+
+      if(i % (SQUARE_LENGTH * 5) == 0){
+       tft.drawFastVLine(i+1, 0, GRAPH_HEIGHT, LINE_COLOR); 
+      }
+    }
+
+  for(int i = 0; i < GRAPH_HEIGHT; i++){
+
+    if(i % SQUARE_LENGTH == 0){
+      tft.drawFastHLine(from, i, to-from, LINE_COLOR);
+    }
+
+    if(i % (SQUARE_LENGTH * 5) == 0){
+     tft.drawFastHLine(from, i+1, to-from, LINE_COLOR); 
+    }
+
+
+  }
+}
+
+
+
+
 static void draw_grid(){
     // TODO
+    //draw_grid_temp(0, SCREEN_WIDTH);
 
-    tft.fillScreen(0xFFFF);
+
+    
+
+    draw_grid_temp(0, SCREEN_WIDTH);
+
+    /*
+
+
+    for(int i = 0; i < SCREEN_WIDTH; i++){
+
+      if(i % SQUARE_LENGTH == 0){
+        tft.drawFastVLine(i, 0, GRAPH_HEIGHT, LINE_COLOR);
+      }
+
+      if(i % (SQUARE_LENGTH * 5) == 0){
+       tft.drawFastVLine(i+1, 0, GRAPH_HEIGHT, LINE_COLOR); 
+      }
+    }
+
+    for(int i = 0; i < GRAPH_HEIGHT; i++){
+
+      if(i % SQUARE_LENGTH == 0){
+        tft.drawFastHLine(0, i, SCREEN_WIDTH, LINE_COLOR);
+      }
+
+      if(i % (SQUARE_LENGTH * 5) == 0){
+       tft.drawFastHLine(0, i+1, SCREEN_WIDTH, LINE_COLOR); 
+      }
+
+
+    }
+    */
+
+
+    tft.drawLine(0,160,320,160, LINE_COLOR);
+
+
+
+
 }
 
 static int get_reading_y(){
     // TODO
 
-    return 100;
+
+    int reading = map(gfx_sample, 0, 4096, 160,0);
+
+    //reading-=20; // (160/2000)*650
+
+
+
+    return constrain(reading,0,160-1);
+    //return 100;
 }
 
 static int get_previous_color(int pos){
@@ -537,29 +635,58 @@ static int get_previous_color(int pos){
     return 0xFFFF;
 }
 
+int last = 0;
 
 static void draw_reading(){
+
+    //draw_grid_temp((cur_pos-20)*3, (cur_pos+20)*3);
 
 
 
     // erase the oldest X readings
     for(int i = cur_pos; i < READING_GAP +cur_pos; i++){
         // actual position, mod
-        int imod = i % SCREEN_WIDTH;
+        int imod = i % VALUE_COUNT;
+
+
 
         // read from the previous_buffer
         uint16_t pre_col = previous_colors[imod];
 
         if(pre_col != -1){
-            // get the y position
+            // get the "i th" y position
             int y = previous_values[imod];
+            int x_pos = imod * 3;
+
+            // get the "i-1 th" y position
+            int prev_i = imod - 1;
+            if(prev_i < 0 ){
+              prev_i = 0;
+            }
+
+            int prev_y = previous_values[prev_i];
+
+            int prev_screen_x = prev_i * 3;
+
+            if(prev_y ==-1  || y == -1){
+
+              }else{
+            tft.drawLine(prev_screen_x, prev_y, x_pos, y, BACKGROUND_COLOR);    
+              }
+
+            
+
+
 
             // erase pixel
-            tft.drawPixel((uint16_t) imod, (uint16_t)y, pre_col);
+            tft.drawPixel((uint16_t) x_pos, (uint16_t)y, pre_col);
 
         }
         
     }
+
+    draw_grid_temp((cur_pos-1)*3, (cur_pos+READING_GAP+1)*3);
+
 
     // get the new reading
     int reading = get_reading_y();
@@ -569,23 +696,70 @@ static void draw_reading(){
     previous_colors[cur_pos] = get_previous_color(cur_pos);
         
     // and draw the actual pixel
-    tft.drawPixel((uint16_t)cur_pos, (uint16_t)reading, GRAPH_COLOR);
+
+    // get the actual screen coordinate for x
+    int screen_x = cur_pos * 3;
+
+
+    tft.drawPixel((uint16_t)screen_x, (uint16_t)reading, GRAPH_COLOR);
+
+    int prev_pos = cur_pos - 1;
+
+    int prev_screen_x = prev_pos * 3;
+
+    // draw a line
+    if(prev_pos < 0){
+      prev_pos = VALUE_COUNT-1;
+      prev_screen_x = 0;
+    }
+
+    
+    if(previous_values[prev_pos] != -1){
+      tft.drawLine(prev_screen_x, previous_values[prev_pos], screen_x, reading, GRAPH_COLOR);  
+    }
+
+
+    
+
+    /**
+    int prev_index = cur_pos -1;
+    if(prev_index < 0){
+      prev_index = SCREEN_WIDTH - prev_index - 1;
+    }
+    */
+
+
+    //tft.drawLine(prev_index, previous_values[prev_index], cur_pos, reading, GRAPH_COLOR);
 
 
     // do one step
     cur_pos++;
-
+    
     // and wrap around if necessary
-    cur_pos = cur_pos % SCREEN_WIDTH;
+    if(cur_pos >= VALUE_COUNT){
+      cout << millis() - last << endl;
+      last = millis();
+      cur_pos = 0;
+    }
+    
+
+    tft.fillRect(SCREEN_WIDTH-3, 0, 3, SCREEN_HEIGHT, BACKGROUND_COLOR);
+    draw_grid_temp(SCREEN_WIDTH-3, SCREEN_WIDTH);
+
+    //tft.drawFastVLine(319, 0, GRAPH_HEIGHT, ILI9341_GREEN);
 }
 
 static void graphics_setup()
 {
 
+    tft.begin();
+    
+    tft.setRotation(3);
+
+    tft.fillScreen(ILI9341_BLACK);
 
 
-
-	for(int i = 0; i < SCREEN_WIDTH; i++){
+	for(int i = 0; i < VALUE_COUNT; i++){
         previous_values[i] = -1;
         previous_colors[i] = -1;
     }
@@ -594,13 +768,46 @@ static void graphics_setup()
 
 }
 
+static void draw_status_bar(){
+
+    tft.setCursor(20,GRAPH_HEIGHT + 10);
+    tft.setTextColor(0xFFFF);
+    tft.setTextSize(2);
+    tft.print("ECG Status:");
+
+    tft.fillRect(20+110+10, GRAPH_HEIGHT+10, 20+110+70, GRAPH_HEIGHT+20, BACKGROUND_COLOR);
+
+    if(is_stable){
+      tft.print("stable");  
+    }else{
+      tft.print("unstable");  
+    }
+    
+
+}
+
+int counter = 0;
+
 static void graphics_loop()
 {
 
     if(last_millis + draw_delay < millis()){
+      counter++;
+
+
         draw_reading();
         last_millis = millis();
+
+
     }
+
+    if(counter % 10 == 0){
+      draw_status_bar();
+    }
+
+
+
+    
     
 }
 
@@ -633,11 +840,10 @@ void setup (void)
     #ifdef DEBUG
         cout << pstr("Initializing TFT...");
     #endif
-    tft.begin();
-    tft.fillScreen(ILI9341_WHITE);
-    tft.setRotation(3);
+        
 
     graphics_setup();
+        cout << pstr("graphics setup done");    
     #ifdef DEBUG
         cout << pstr("done") << endl;
     #endif
@@ -699,10 +905,56 @@ void finalize(void)
 //                                 MAIN LOOP                             //
 ///////////////////////////////////////////////////////////////////////////
 
+
+
+#define STAB_BUF 100
+
+int stab_buf_counter = 0;
+
+uint16_t stabilizing_buffer[STAB_BUF];
+
+static float mean(){
+  
+  float sum = 0;
+
+  for(int i = 0; i < STAB_BUF; i++){
+    sum+=stabilizing_buffer[i];
+  }
+
+  return sum / STAB_BUF;
+
+}
+
+static float variance(){
+
+  float m = mean();
+
+  float sum = 0;
+
+  for(int i = 0; i < STAB_BUF; i++){
+    sum+=pow(stabilizing_buffer[i] - m,2);
+  }
+
+  return sqrt(sum/STAB_BUF);
+
+}
+
+static bool stable(float stdDev){
+  return stdDev < 400;
+}
+
+
+bool was_stable = true;
+
+int button_pressed_at = 0;
+
 void loop (void)
 {
     // Was the button pressed to either start or abort a measurement?
     if(wasButtonPressed()) {
+
+
+        
 
         // Start a new measurement in case it is not running currently.
         if (!measurement_running) {
@@ -710,12 +962,19 @@ void loop (void)
           // Claim the heart rate measurement as running.
           measurement_running = true;
 
+
         // Otherwise, abort the current heart rate measurement.
         } else {
           // Finalize the heart rate measurement.
           finalize();
         }
     }
+
+    //uint16_t sample = getLatestFilteredHeartRateSample ();
+    //gfx_sample = sample;
+
+    
+
 
     // Is a heart rate measurement currently running?
     if (measurement_running) {
@@ -732,11 +991,32 @@ void loop (void)
 
             // Acquire the lastest filtered sample of the heart rate signal.
             uint16_t sample = getLatestFilteredHeartRateSample ();
+            gfx_sample = sample;
 
             // Remember the sample in the next free slot of the measurement buffer.
             ASSERT (0 <= measure_index < MEASUREMENT_SIZE);
             measurement_buffer[measure_index] = sample;
             ++measure_index;
+
+            stabilizing_buffer[stab_buf_counter++] = gfx_sample;
+            if(stab_buf_counter >= STAB_BUF){
+              stab_buf_counter = 0;
+            }
+
+            var = variance();
+
+            is_stable = stable(var);
+
+
+
+            // if(!is_stable){
+            //   was_stable = false;
+            // }
+
+            // if(is_stable && was_stable){
+              
+            // }
+
         }
 
         // Did we acquire all samples of the current measurement?
