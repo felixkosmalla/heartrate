@@ -58,7 +58,7 @@ typedef enum Status { STOPPED, STARTED, RUNNING };
 static Status status = STOPPED, old_status = RUNNING; // Heart rate monitor status.
 
 static const size_t SAMPLING_RATE = 250;        // 250Hz
-static const size_t MEASURE_DURATION = 10;      // 30sec
+static const size_t MEASURE_DURATION = 30;      // 30sec
 
 // Buffer holds 30sec * 250Hz samples obtained during a measurement.
 static size_t measure_index = 0;
@@ -513,10 +513,11 @@ static void addToStabilizationBuffer(uint16_t sample)
             stabilizing_buffer[i] = sample;
         }
         stab_buf_initialized = true;
+        stab_buf_i = 0;
     } else {
         stabilizing_buffer[stab_buf_i] = sample;
         stab_buf_i = (stab_buf_i + 1) % STAB_BUF_SIZE;
-        if(stab_buf_i == 1){
+        if(stab_buf_i == 0){
           resetStabilization();
         }
     }
@@ -794,11 +795,7 @@ static void graphics_update (void)
 uint32_t max_val = 0;
 uint32_t min_val = 5000;
 
-static void resetStabilization(){
-  max_val = 0;
-  min_val = 5000;
 
-}
 
 static bool isSignalStable (void)
 {
@@ -833,7 +830,7 @@ static bool isSignalStable (void)
       min_val = min(min_val, stabilizing_buffer[i]);
     }
 
-    bool stable = (max_val < 4000 && min_val > 500);
+    bool stable = (max_val < 4000 && min_val > 100);
 
     cout << stable << endl;
     //return stable;
@@ -946,6 +943,8 @@ void finalize(void)
 }
 
 
+bool was_stable = true;
+
 static void resetRecording(){
 
     // Clear the ADC IMU interrupts.
@@ -954,17 +953,38 @@ static void resetRecording(){
     noInterrupts();
     measure_index = 0;
     done_recording = false;
+    
+
+
+    resetStabilization();
+
     interrupts();
 
     // reset the graph
     graphics_setup();
 
-    set_state(STARTED);
+    set_state(STOPPED);
+}
+
+
+static void resetStabilization(){
+  max_val = 0;
+  min_val = 5000;
+
+  //stab_buf_initialized = false;
+
+
 }
 
 ///////////////////////////////////////////////////////////////////////////
 //                                 MAIN LOOP                             //
 ///////////////////////////////////////////////////////////////////////////
+
+
+
+int safe_delay = 1000;
+int safe_ts = 0;
+bool engaged = false;
 
 void loop (void)
 {
@@ -975,6 +995,8 @@ void loop (void)
         if (status == STOPPED) {
 
           // Claim the heart rate measurement shall start.
+          resetStabilization();
+          resetRecording();
           set_state(STARTED);
           //old_status = status;
           //status = STARTED;
@@ -987,38 +1009,56 @@ void loop (void)
         }
     }
 
+
+    // Did there occur an ADC interrupt recently?
+    if (adcInterrupt) {
+
+            /* Clear the ADC interrupt flag.
+             * NOTE: The variable adcInterrupt is shared with the interrupt service routine adc0_isr.
+             *       However, we do not need to disable the interrupts temporarily since the variable
+             *       adcInterrupt is of boolean type; a bool occupies one single byte on the target
+             *       platform and it will be modified atomically in the single-core Freescale ARM CPU. */
+            adcInterrupt = false;
+
+            // Acquire the lastest filtered sample of the heart rate signal.
+            uint16_t sample = getLatestFilteredHeartRateSample ();
+            gfx_sample = sample; // Tell graphics about new sample.
+
+
+            
+            /* add the sample to the stabilization buffer. */
+            addToStabilizationBuffer (sample);
+            
+    }
+
     if (status != STOPPED) {
 
-        // Did there occur an ADC interrupt recently?
-        if (adcInterrupt) {
 
-                /* Clear the ADC interrupt flag.
-                 * NOTE: The variable adcInterrupt is shared with the interrupt service routine adc0_isr.
-                 *       However, we do not need to disable the interrupts temporarily since the variable
-                 *       adcInterrupt is of boolean type; a bool occupies one single byte on the target
-                 *       platform and it will be modified atomically in the single-core Freescale ARM CPU. */
-                adcInterrupt = false;
-
-                // Acquire the lastest filtered sample of the heart rate signal.
-                uint16_t sample = getLatestFilteredHeartRateSample ();
-                gfx_sample = sample; // Tell graphics about new sample.
-
-
-                
-                /* add the sample to the stabilization buffer. */
-                addToStabilizationBuffer (sample);
-                
-        }
 
         // Was a heart rate measurement recently started?
         if (status == STARTED) {
 
             // Is the signal already stable?
-            if (isSignalStable()) {
-                set_state(RUNNING);
+            if (isSignalStable() && !was_stable && !engaged) {
+                //set_state(RUNNING);
                 //old_status = status;
                 //status = RUNNING;
+                //
+                engaged = true;
+                safe_ts = millis() + safe_delay;
             }
+
+            if(engaged && safe_ts < millis()){
+                engaged = false;
+                if(isSignalStable()){
+                    set_state(RUNNING);
+
+                }
+            }
+
+
+
+           
 
         // Is a heart rate measurement currently running?
         } else if (status == RUNNING) {
@@ -1026,6 +1066,7 @@ void loop (void)
 
           if(!isSignalStable()){
             resetRecording();
+            set_state(STARTED);
           }
         
 
@@ -1035,6 +1076,8 @@ void loop (void)
                 finalize();
             }
         }
+
+         was_stable = isSignalStable();
     }
 
     // Update the TFT graphics for the heart rate monitor.
