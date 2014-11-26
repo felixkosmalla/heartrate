@@ -58,7 +58,7 @@ typedef enum Status { STOPPED, STARTED, RUNNING };
 static Status status = STOPPED, old_status = RUNNING; // Heart rate monitor status.
 
 static const size_t SAMPLING_RATE = 250;        // 250Hz
-static const size_t MEASURE_DURATION = 30;      // 30sec
+static const size_t MEASURE_DURATION = 10;      // 30sec
 
 // Buffer holds 30sec * 250Hz samples obtained during a measurement.
 static size_t measure_index = 0;
@@ -68,6 +68,8 @@ static uint16_t measurement_buffer[MEASUREMENT_SIZE];
 // The latest acquired raw and filtered sample of the heart rate signal.
 static volatile uint16_t heart_rate_signal_raw;
 static volatile uint16_t heart_rate_signal_filtered;
+
+static bool done_recording = false;
 
 // Forward declarations.
 static void adcInit(void);
@@ -212,9 +214,11 @@ void adc0_isr (void)
       // Remember the sample in the next free slot of the measurement buffer.
       if((0 <= measure_index) && (measure_index < MEASUREMENT_SIZE)){
         measurement_buffer[measure_index] = heart_rate_signal_filtered;
-        ++measure_index;  
+        ++measure_index;
+      }else{
+        done_recording = true;
       }
-  
+        
     }
     
     /* Set interrupt flag to notify the main loop that a new
@@ -516,8 +520,6 @@ static void addToStabilizationBuffer(uint16_t sample)
           resetStabilization();
         }
     }
-
-    cout << "stab" << endl;
 }
 
 static float mean (void)
@@ -831,16 +833,16 @@ static bool isSignalStable (void)
       min_val = min(min_val, stabilizing_buffer[i]);
     }
 
-    bool stable = (max_val > 2300 && min_val < 1300);
+    bool stable = (max_val < 4000 && min_val > 500);
 
     cout << stable << endl;
-    return stable;
+    //return stable;
 
 
     //cout << max_val << " " << min_val << endl;
 
 
-    //return true;
+    return stable;
 }
 
 
@@ -934,18 +936,35 @@ void finalize(void)
     set_state(STOPPED);
 
     // Finally, forget all the acquired samples.
+    noInterrupts();
     measure_index = 0;
+    done_recording = false;
+    interrupts();
 
     // reset the graph
     graphics_setup();
 }
 
+
+static void resetRecording(){
+
+    // Clear the ADC IMU interrupts.
+    adcInterrupt = false;
+
+    noInterrupts();
+    measure_index = 0;
+    done_recording = false;
+    interrupts();
+
+    // reset the graph
+    graphics_setup();
+
+    set_state(STARTED);
+}
+
 ///////////////////////////////////////////////////////////////////////////
 //                                 MAIN LOOP                             //
 ///////////////////////////////////////////////////////////////////////////
-
-
-/// STOPPED, STARTED, RUNNING
 
 void loop (void)
 {
@@ -1005,11 +1024,13 @@ void loop (void)
         } else if (status == RUNNING) {
 
 
-          
+          if(!isSignalStable()){
+            resetRecording();
+          }
         
 
             // Did we acquire all samples of the current measurement?
-            if (measure_index == MEASUREMENT_SIZE-1 || !isSignalStable()) {
+            if (done_recording) {
                 // Finalize the heart rate measurement.
                 finalize();
             }
