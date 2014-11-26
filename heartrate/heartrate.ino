@@ -73,6 +73,16 @@ static volatile uint16_t heart_rate_signal_filtered;
 static void adcInit(void);
 static void adcCalibrate(void);
 static void pdbInit(void);
+static void resetStabilization(void);
+
+static void set_state(Status s){
+  noInterrupts();
+  old_status = status;
+  status = s;
+  interrupts();
+}
+
+
 
 static void heart_rate_acquisition_setup (void)
 {
@@ -170,6 +180,8 @@ float getAverage (struct MovingAverageBuffer &m) {
    return sum/((float)BUF_SIZE);
 }
 
+
+
 /* ADC interrupt routine.
  * 
  * Each time the ADC triggers an interrupt the interrupt service
@@ -195,6 +207,15 @@ void adc0_isr (void)
     	//analogWrite(A9,getAverage(ma_buf));
     	analogWrite(A9, heart_rate_signal_filtered);
     #endif
+
+    if(status == RUNNING){
+      // Remember the sample in the next free slot of the measurement buffer.
+      if((0 <= measure_index) && (measure_index < MEASUREMENT_SIZE)){
+        measurement_buffer[measure_index] = heart_rate_signal_filtered;
+        ++measure_index;  
+      }
+  
+    }
     
     /* Set interrupt flag to notify the main loop that a new
      * ADC sample is ready to be processed. */ 
@@ -476,7 +497,7 @@ static void writeSamplesToLogFile (void)
 
 static bool is_stable = false;
 
-static const size_t STAB_BUF_SIZE = 100;
+static const size_t STAB_BUF_SIZE = 250;
 static uint16_t stabilizing_buffer[STAB_BUF_SIZE];
 static size_t stab_buf_i = 0;
 static size_t stab_buf_initialized = false;
@@ -491,6 +512,9 @@ static void addToStabilizationBuffer(uint16_t sample)
     } else {
         stabilizing_buffer[stab_buf_i] = sample;
         stab_buf_i = (stab_buf_i + 1) % STAB_BUF_SIZE;
+        if(stab_buf_i == 1){
+          resetStabilization();
+        }
     }
 }
 
@@ -521,28 +545,7 @@ static const long SIGNAL_STABILIZATION_DELAY = 200;
 static bool lastSignalState = false;
 static bool signalState = false;
 
-static bool isSignalStable (void)
-{
-    uint32_t stdDev = (uint32_t)(sqrt(variance()) + 0.5f);
 
-    bool signalReading = (250 <= stdDev) && (stdDev <= 350);
-
-    if (signalReading != lastSignalState) {
-        lastSignalStateTime = millis();
-    }
-
-    if ((millis() - lastSignalStateTime) > SIGNAL_STABILIZATION_DELAY) {
-
-        if (signalReading != signalState) {
-            signalState = signalReading;
-            return signalState;
-        }
-    }
-
-    lastSignalState = signalReading;
-
-    return false;
-}
 
 ///////////////////////////////////////////////////////////////////////////
 //                               GRAPHICS                                //
@@ -566,17 +569,9 @@ static Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
 #define LINE_COLOR ILI9341_RED
 #define BACKGROUND_COLOR ILI9341_BLACK
 
-/*
-// Used to run graphics more smoothly
-int[] graphics_buffer = new int[SCREEN_WIDTH*SCREEN_HEIGHT]
-
-// Indicated if 
-bool[] changed_x = new bool[SCREEN_WIDTH];
-bool[] changed_y = new bool[SCREEN_HEIGHT];
-*/
 
 // defines the number of readings / pixels that should be omitted
-#define READING_GAP 10
+#define READING_GAP 2
 
 #define VALUE_COUNT  107
 
@@ -592,11 +587,14 @@ static uint16_t previous_colors[VALUE_COUNT];
 // current position
 static int cur_pos = 0;
 
-static const int DRAW_DELAY = 15;
+static const int DRAW_DELAY = 10;
 static int last_millis = 0;
 
 static void draw_grid_intern (int from, int to)
 {
+
+
+
     tft.drawFastVLine(0, 0, GRAPH_HEIGHT, LINE_COLOR);
     for (int i = from; i < to; i++) {
 
@@ -623,31 +621,10 @@ static void draw_grid_intern (int from, int to)
 
 static void draw_grid (void)
 {
+
     draw_grid_intern(0, SCREEN_WIDTH);
 
-    /*
-    for(int i = 0; i < SCREEN_WIDTH; i++){
-
-      if(i % SQUARE_LENGTH == 0){
-        tft.drawFastVLine(i, 0, GRAPH_HEIGHT, LINE_COLOR);
-      }
-
-      if(i % (SQUARE_LENGTH * 5) == 0){
-       tft.drawFastVLine(i+1, 0, GRAPH_HEIGHT, LINE_COLOR); 
-      }
-    }
-
-    for(int i = 0; i < GRAPH_HEIGHT; i++){
-
-      if(i % SQUARE_LENGTH == 0){
-        tft.drawFastHLine(0, i, SCREEN_WIDTH, LINE_COLOR);
-      }
-
-      if(i % (SQUARE_LENGTH * 5) == 0){
-       tft.drawFastHLine(0, i+1, SCREEN_WIDTH, LINE_COLOR); 
-      }
-    }
-    */
+    
 
     tft.drawLine(0,160,320,160, LINE_COLOR);
 }
@@ -695,8 +672,7 @@ static void draw_reading (void)
                 tft.drawLine(prev_screen_x, prev_y, x_pos, y, BACKGROUND_COLOR);    
             }
 
-            // erase pixel
-            tft.drawPixel((uint16_t) x_pos, (uint16_t)y, pre_col);
+            
         }        
     }
 
@@ -712,7 +688,7 @@ static void draw_reading (void)
     // get the actual screen coordinate for x
     int screen_x = cur_pos * 3;
 
-    tft.drawPixel((uint16_t)screen_x, (uint16_t)reading, GRAPH_COLOR);
+    //tft.drawPixel((uint16_t)screen_x, (uint16_t)reading, GRAPH_COLOR);
 
     int prev_pos = cur_pos - 1;
     int prev_screen_x = prev_pos * 3;
@@ -741,11 +717,15 @@ static void draw_reading (void)
     
     // and wrap around if necessary
     if (cur_pos >= VALUE_COUNT) {
+      int diff = millis() - last;
         #ifdef DEBUG
-            cout << millis() - last << endl;
+            cout << diff << endl;
         #endif
         last = millis();
         cur_pos = 0;
+
+
+
     }    
 
     tft.fillRect(SCREEN_WIDTH-3, 0, 3, SCREEN_HEIGHT, BACKGROUND_COLOR);
@@ -777,14 +757,14 @@ static void draw_status_bar (void)
 
 static void graphics_setup (void)
 {
-    tft.begin();    
-    tft.setRotation(3);
     tft.fillScreen(ILI9341_BLACK);
 
     for (int i = 0; i < VALUE_COUNT; i++) {
         previous_values[i] = -1;
         previous_colors[i] = -1;
     }
+
+    cur_pos = 0;
 
     draw_grid();
 }
@@ -800,10 +780,68 @@ static void graphics_update (void)
         }
     }
 
-    if (counter % 10 == 0) {
+    //if (counter % 10 == 0) {
       draw_status_bar();
-    }    
+    //}    
 }
+
+
+// get min and max
+uint32_t max_val = 0;
+uint32_t min_val = 5000;
+
+static void resetStabilization(){
+  max_val = 0;
+  min_val = 5000;
+
+}
+
+static bool isSignalStable (void)
+{
+
+    /*
+    uint32_t stdDev = (uint32_t)(sqrt(variance()) + 0.5f);
+
+    cout << stdDev << endl;
+
+    bool signalReading = (200 <= stdDev) && (stdDev <= 400);
+
+    if (signalReading != lastSignalState) {
+        lastSignalStateTime = millis();
+    }
+
+    if ((millis() - lastSignalStateTime) > SIGNAL_STABILIZATION_DELAY) {
+
+        if (signalReading != signalState) {
+            signalState = signalReading;
+            return signalState;
+        }
+    }
+
+    lastSignalState = signalReading;
+
+    */
+
+
+
+    for(int i = 0; i < STAB_BUF_SIZE; i++){
+      max_val = max(max_val, stabilizing_buffer[i]);
+      min_val = min(min_val, stabilizing_buffer[i]);
+    }
+
+    bool stable = (max_val > 2300 && min_val < 1300);
+
+    cout << stable << endl;
+    return stable;
+
+
+    //cout << max_val << " " << min_val << endl;
+
+
+    //return true;
+}
+
+
 
 ///////////////////////////////////////////////////////////////////////////
 //                                   SETUP                               //
@@ -834,6 +872,9 @@ void setup (void)
     #ifdef DEBUG
         cout << pstr("Initializing TFT...");
     #endif
+    tft.begin();    
+    tft.setRotation(3);
+    
     graphics_setup();   
     #ifdef DEBUG
         cout << pstr("done") << endl;
@@ -888,16 +929,21 @@ void finalize(void)
     }
 
     // Stop the measurement of heart rate.
-    old_status = status;
-    status = STOPPED;
+    set_state(STOPPED);
 
     // Finally, forget all the acquired samples.
     measure_index = 0;
+
+    // reset the graph
+    graphics_setup();
 }
 
 ///////////////////////////////////////////////////////////////////////////
 //                                 MAIN LOOP                             //
 ///////////////////////////////////////////////////////////////////////////
+
+
+/// STOPPED, STARTED, RUNNING
 
 void loop (void)
 {
@@ -908,8 +954,9 @@ void loop (void)
         if (status == STOPPED) {
 
           // Claim the heart rate measurement shall start.
-          old_status = status;
-          status = STARTED;
+          set_state(STARTED);
+          //old_status = status;
+          //status = STARTED;
 
         // Otherwise, abort the current heart rate measurement.
         } else {
@@ -935,16 +982,11 @@ void loop (void)
                 uint16_t sample = getLatestFilteredHeartRateSample ();
                 gfx_sample = sample; // Tell graphics about new sample.
 
-                // Remember the sample in the next free slot of the measurement buffer.
-                ASSERT ((0 <= measure_index) && (measure_index < MEASUREMENT_SIZE));
-                measurement_buffer[measure_index] = sample;
-                ++measure_index;
 
-                /* If the measurement was recently started, 
-                 * add the sample to the stabilization buffer. */
-                if (status == STARTED) {
-                    addToStabilizationBuffer (sample);
-                }
+                
+                /* add the sample to the stabilization buffer. */
+                addToStabilizationBuffer (sample);
+                
         }
 
         // Was a heart rate measurement recently started?
@@ -952,15 +994,20 @@ void loop (void)
 
             // Is the signal already stable?
             if (isSignalStable()) {
-                old_status = status;
-                status = RUNNING;
+                set_state(RUNNING);
+                //old_status = status;
+                //status = RUNNING;
             }
 
         // Is a heart rate measurement currently running?
         } else if (status == RUNNING) {
 
+
+          
+        
+
             // Did we acquire all samples of the current measurement?
-            if (measure_index == MEASUREMENT_SIZE) {
+            if (measure_index == MEASUREMENT_SIZE-1 || !isSignalStable()) {
                 // Finalize the heart rate measurement.
                 finalize();
             }
