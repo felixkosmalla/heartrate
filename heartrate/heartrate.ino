@@ -15,7 +15,7 @@
 ///////////////////////////////////////////////////////////////////////////
 
 #include "SPI.h"                /* SPI library is used to communicate with the
-                                * ILI9341_t3 display and the SD card reader. */
+                                 * ILI9341_t3 display and the SD card reader. */
 #include <SdFat.h>              // SdFat library is used to access the SD card.
 #include "Adafruit_GFX.h"       // Adafruit GFX library is used for the user interface.
 #include "Adafruit_ILI9341.h"   // ILI9341_t3 library defines the display functions.
@@ -27,7 +27,7 @@
 //                                DEBUG                                  //
 ///////////////////////////////////////////////////////////////////////////
 
-//#define DEBUG // Uncomment to generate debug output on the serial port.
+#define DEBUG // Uncomment to generate debug output on the serial port.
 
 #ifdef DEBUG
     // Serial monitor output stream.
@@ -59,7 +59,7 @@ typedef enum Status { STOPPED, STABILIZING, RUNNING };
 /* Status of the heart rate monior.
  *
  * STOPPED: No heart rate measurement running.
- * STABILIZING: Heart rate reasurement started, waiting until signal is stable.
+ * STABILIZING: Wait until signal is stable before starting the heart rate measurement.
  * RUNNING: Heart rate measruement is running, signal is stable. */ 
 static Status status = STOPPED, old_status = RUNNING;
 
@@ -96,6 +96,102 @@ static void adcCalibrate(void);
 static void pdbInit(void);
 static void resetStabilization(void);
 
+/*
+
+FIR filter designed with
+ http://t-filter.appspot.com
+
+sampling frequency: 250 Hz
+
+* 0 Hz - 25 Hz
+  gain = 1
+  desired ripple = 4 dB
+  actual ripple = 62.67389876611182 dB
+
+* 26 Hz - 125 Hz
+  gain = 0
+  desired attenuation = -80 dB
+  actual attenuation = -65.33155455202755 dB
+
+*/
+
+// #define LOWPASS25HZFILTER_TAP_NUM 10
+
+// typedef struct {
+//   double history[LOWPASS25HZFILTER_TAP_NUM];
+//   unsigned int last_index;
+// } lowPass25HzFilter;
+
+// lowPass25HzFilter low_pass_filter;
+
+// void lowPass25HzFilter_init(lowPass25HzFilter* f);
+// void lowPass25HzFilter_put(lowPass25HzFilter* f, double input);
+// double lowPass25HzFilter_get(lowPass25HzFilter* f);
+
+// static double filter_taps[LOWPASS25HZFILTER_TAP_NUM] = {
+//   0.00044197310789849555,
+//   0.00040910722238711526,
+//   0.0005359479127676144,
+//   0.0006347682508973325,
+//   0.0006889350587178279,
+//   0.0006889350587178279,
+//   0.0006347682508973325,
+//   0.0005359479127676144,
+//   0.00040910722238711526,
+//   0.00044197310789849555
+// };
+
+// void lowPass25HzFilter_init(lowPass25HzFilter* f) {
+//   int i;
+//   for(i = 0; i < LOWPASS25HZFILTER_TAP_NUM; ++i)
+//     f->history[i] = 0;
+//   f->last_index = 0;
+// }
+
+// void lowPass25HzFilter_put(lowPass25HzFilter* f, double input) {
+//   f->history[f->last_index++] = input;
+//   if(f->last_index == LOWPASS25HZFILTER_TAP_NUM)
+//     f->last_index = 0;
+// }
+
+// double lowPass25HzFilter_get(lowPass25HzFilter* f) {
+//   double acc = 0;
+//   int index = f->last_index, i;
+//   for(i = 0; i < LOWPASS25HZFILTER_TAP_NUM; ++i) {
+//     index = index != 0 ? index-1 : LOWPASS25HZFILTER_TAP_NUM-1;
+//     acc += f->history[index] * filter_taps[i];
+//   };
+//   return acc;
+// }
+
+/* Digital filter designed by mkfilter/mkshape/gencode   A.J. Fisher
+   Command line: /www/usr/fisher/helpers/mkfilter -Bu -Lp -o 10 -a 1.0000000000e-01 0.0000000000e+00 -l */
+
+#define NZEROS 10
+#define NPOLES 10
+#define GAIN   5.939718719e+05
+
+static float xv[NZEROS+1], yv[NPOLES+1];
+
+static float lowPass(float input)
+{
+        xv[0] = xv[1]; xv[1] = xv[2]; xv[2] = xv[3]; xv[3] = xv[4];
+        xv[4] = xv[5]; xv[5] = xv[6]; xv[6] = xv[7]; xv[7] = xv[8]; 
+        xv[8] = xv[9]; xv[9] = xv[10]; 
+        xv[10] = input / GAIN;
+        yv[0] = yv[1]; yv[1] = yv[2]; yv[2] = yv[3]; yv[3] = yv[4];
+        yv[4] = yv[5]; yv[5] = yv[6]; yv[6] = yv[7]; yv[7] = yv[8];
+        yv[8] = yv[9]; yv[9] = yv[10]; 
+        yv[10] =   (xv[0] + xv[10]) + 10 * (xv[1] + xv[9]) + 45 * (xv[2] + xv[8])
+                     + 120 * (xv[3] + xv[7]) + 210 * (xv[4] + xv[6]) + 252 * xv[5]
+                     + ( -0.0164796305 * yv[0]) + (  0.2309193459 * yv[1])
+                     + ( -1.4737279370 * yv[2]) + (  5.6470743441 * yv[3])
+                     + (-14.4056874260 * yv[4]) + ( 25.6017495970 * yv[5])
+                     + (-32.1597564880 * yv[6]) + ( 28.2587879000 * yv[7])
+                     + (-16.6721933230 * yv[8]) + (  5.9875896298 * yv[9]);
+        return yv[10];
+}
+
 /**
  * Setups the ADC and PDB for the heart rate signal acquisition.
  */
@@ -108,6 +204,8 @@ static void setupHeartRateAcquisition (void)
        // Use full DAC resolution; same as our ADC input.
 	   analogWriteResolution(12);
     #endif
+
+    //lowPass25HzFilter_init(&low_pass_filter);
 
     // Initialize the Analog-To-Digital converter.
     #ifdef DEBUG
@@ -146,32 +244,7 @@ inline static float getLatestFilteredHeartRateSample (void)
     return heart_rate;
 }
 
-/* 
-
-// Digital filter designed by mkfilter/mkshape/gencode   A.J. Fisher
-// Command line: /www/usr/fisher/helpers/mkfilter -Bu -Bp -o 2 -a 2.0000000000e-03 4.0000000000e-02 -l
-
-#define NZEROS 4
-#define NPOLES 4
-#define GAIN   8.065013510e+01
-
-static float xv[NZEROS+1], yv[NPOLES+1];
-
-static float bandpass_filter (float input)
-{ 		
-	xv[0] = xv[1]; xv[1] = xv[2]; xv[2] = xv[3]; xv[3] = xv[4]; 
-    xv[4] = input / GAIN;
-    yv[0] = yv[1]; yv[1] = yv[2]; yv[2] = yv[3]; yv[3] = yv[4]; 
-    yv[4] =   (xv[0] + xv[4]) - 2 * xv[2]
-               + ( -0.7134582933 * yv[0]) + (  3.0868626800 * yv[1])
-               + ( -5.0324499193 * yv[2]) + (  3.6590370320 * yv[3]);
-    return yv[4];
-}
-
-*/
-
 // Moving average -> low pass filter
-// TODO: Shall be optimized too reduce computation costs in the ADC ISR.
 #define BUF_SIZE 5
 struct MovingAverageBuffer {
     float buf[BUF_SIZE];
@@ -226,7 +299,10 @@ void adc0_isr (void)
 	addToMovingAverageBuffer(ma_buf, heart_rate_signal_raw);
 	heart_rate_signal_filtered = getAverage(ma_buf);
 
-    //heart_rate_signal_filtered = bandpass_filter(heart_rate_signal_raw);
+    //lowPass25HzFilter_put(&low_pass_filter, heart_rate_signal_raw);
+    //heart_rate_signal_filtered = lowPass25HzFilter_get(&low_pass_filter);
+    
+    heart_rate_signal_filtered = lowPass(heart_rate_signal_raw);
     
     #ifdef DEBUG
     	analogWrite(A9, heart_rate_signal_filtered);
@@ -576,11 +652,6 @@ static bool isSignalStable (void)
     // In case of too much noise, the signal is instable.
     bool stable = (max_stab_val < 4000 && min_stab_val > 100);
 
-    //#ifdef DEBUG
-        //cout << stable << endl;
-        //cout << max_stab_val << " " << min_stab_val << endl;
-    //#endif
-
     return stable;
 }
 
@@ -618,9 +689,6 @@ static Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
 
 // Screen buffer.
 static int32_t previous_values[VALUE_COUNT];
-
-// Color buffer. Used to redraw the pixel.
-static uint16_t previous_colors[VALUE_COUNT];
 
 // Current position.
 static int cur_pos = 0;
@@ -689,10 +757,6 @@ static int get_reading_y (void) {
     return constrain(reading,0,160-1);
 }
 
-static int get_previous_color (int pos) {
-    return 0xFFFF;
-}
-
 /**
  * Draw the samples of the heart rate signal on the TFT display.
  */
@@ -702,32 +766,25 @@ static int get_previous_color (int pos) {
 static void draw_reading (void)
 {
     // Erase the oldest X readings.
-    for(int i = cur_pos; i < READING_GAP +cur_pos; i++){
+    for (int i = cur_pos; i < READING_GAP +cur_pos; i++) {
         // actual position, mod.
         int imod = i % VALUE_COUNT;
 
-        // Read from the previous_buffer.
-        uint16_t pre_col = previous_colors[imod];
+        // Get the "i th" y position.
+        int y = previous_values[imod];
+        int x_pos = imod * 3;
 
-        if (pre_col != -1) {
-            
-            // Get the "i th" y position.
-            int y = previous_values[imod];
-            int x_pos = imod * 3;
+        // Get the "i-1 th" y position.
+        int prev_i = imod - 1;
+        if (prev_i < 0 ) {
+            prev_i = 0;
+        }
 
-            // Get the "i-1 th" y position.
-            int prev_i = imod - 1;
-            if (prev_i < 0 ) {
-                prev_i = 0;
-            }
+        int prev_y = previous_values[prev_i];
+        int prev_screen_x = prev_i * 3;
 
-            int prev_y = previous_values[prev_i];
-            int prev_screen_x = prev_i * 3;
-
-            if (prev_y == -1  || y == -1) {}
-            else {
-                tft.drawLine(prev_screen_x, prev_y, x_pos, y, BACKGROUND_COLOR);    
-            }
+        if (prev_y != -1 && y != -1) {
+            tft.drawLine(prev_screen_x, prev_y, x_pos, y, BACKGROUND_COLOR);    
         }        
     }
 
@@ -737,9 +794,6 @@ static void draw_reading (void)
     // Get the new reading.
     int reading = get_reading_y();
     previous_values[cur_pos] = reading;
-
-    // Save the current color.
-    previous_colors[cur_pos] = get_previous_color(cur_pos);
 
     // Get the actual screen coordinate for x.
     int screen_x = cur_pos * 3;
@@ -806,7 +860,6 @@ static void graphics_setup (void)
 
     for (int i = 0; i < VALUE_COUNT; i++) {
         previous_values[i] = -1;
-        previous_colors[i] = -1;
     }
 
     // Draw an empty calibration grid.
@@ -1011,11 +1064,13 @@ void loop (void)
 
     if (status != STOPPED) {
 
+        bool is_stable = isSignalStable();
+
         // Was a heart rate measurement recently started and we are waiting until it is stable?
         if (status == STABILIZING) {
 
             // Is the heart signal stable now?
-            if (isSignalStable() && !was_stable && !wait_for_stable) {
+            if (is_stable && !was_stable && !wait_for_stable) {
 
                 // Wait a moment and check again if the signal is stable.
                 wait_for_stable = true;
@@ -1029,7 +1084,7 @@ void loop (void)
                 wait_for_stable = false;
 
                 // Is the signal still stable?
-                if (isSignalStable()) {
+                if (is_stable) {
                     // If yes, start the heart reate measurement immediately.
                     setStatus(RUNNING);
                 }
@@ -1039,7 +1094,7 @@ void loop (void)
         } else if (status == RUNNING) {
 
             // Once the signal becomes instable wait until it is stable again.
-            if (!isSignalStable()) {
+            if (!is_stable) {
                 resetRecording();
                 // Claim that we are waiting until the signal of heart rate is stable again.
                 setStatus(STABILIZING);
@@ -1055,7 +1110,7 @@ void loop (void)
             }
         }
         
-        was_stable = isSignalStable();
+        was_stable = is_stable;
     }
 
     // Update the TFT graphics for the heart rate monitor.
