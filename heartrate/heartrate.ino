@@ -27,7 +27,7 @@
 //                                DEBUG                                  //
 ///////////////////////////////////////////////////////////////////////////
 
-#define DEBUG // Uncomment to generate debug output on the serial port.
+//#define DEBUG // Uncomment to generate debug output on the serial port.
 
 #ifdef DEBUG
     // Serial monitor output stream.
@@ -54,22 +54,41 @@
 //                       HEART RATE SIGNAL PROCESSING                    //
 ///////////////////////////////////////////////////////////////////////////
 
-typedef enum Status { STOPPED, STARTED, RUNNING };
-static Status status = STOPPED, old_status = RUNNING; // Heart rate monitor status.
+typedef enum Status { STOPPED, STABILIZING, RUNNING };
+
+/* Status of the heart rate monior.
+ *
+ * STOPPED: No heart rate measurement running.
+ * STABILIZING: Heart rate reasurement started, waiting until signal is stable.
+ * RUNNING: Heart rate measruement is running, signal is stable. */ 
+static Status status = STOPPED, old_status = RUNNING;
+
+/**
+ * Changes the status of the heart rate monitor while saving the previous one. 
+ * @param s New status of the heart rate monitor. (STOPPED, STABILIZING or RUNNING)
+ */
+static void setStatus(Status s)
+{
+  noInterrupts();
+  old_status = status;
+  status = s;
+  interrupts();
+}
+
+// Signals whether the a measurment of the heart rate is done.
+static volatile bool measurement_done = false;
 
 static const size_t SAMPLING_RATE = 250;        // 250Hz
 static const size_t MEASURE_DURATION = 30;      // 30sec
 
 // Buffer holds 30sec * 250Hz samples obtained during a measurement.
-static size_t measure_index = 0;
 static const size_t MEASUREMENT_SIZE = SAMPLING_RATE*MEASURE_DURATION;
-static uint16_t measurement_buffer[MEASUREMENT_SIZE];
+static volatile size_t measure_index = 0;
+static volatile uint16_t measurement_buffer[MEASUREMENT_SIZE];
 
 // The latest acquired raw and filtered sample of the heart rate signal.
 static volatile uint16_t heart_rate_signal_raw;
 static volatile uint16_t heart_rate_signal_filtered;
-
-static bool done_recording = false;
 
 // Forward declarations.
 static void adcInit(void);
@@ -77,16 +96,10 @@ static void adcCalibrate(void);
 static void pdbInit(void);
 static void resetStabilization(void);
 
-static void set_state(Status s){
-  noInterrupts();
-  old_status = status;
-  status = s;
-  interrupts();
-}
-
-
-
-static void heart_rate_acquisition_setup (void)
+/**
+ * Setups the ADC and PDB for the heart rate signal acquisition.
+ */
+static void setupHeartRateAcquisition (void)
 {
 	/**
 	 * Debug purpose only
@@ -133,8 +146,10 @@ inline static float getLatestFilteredHeartRateSample (void)
     return heart_rate;
 }
 
-/* Digital filter designed by mkfilter/mkshape/gencode   A.J. Fisher
-   Command line: /www/usr/fisher/helpers/mkfilter -Bu -Bp -o 2 -a 2.0000000000e-03 4.0000000000e-02 -l */
+/* 
+
+// Digital filter designed by mkfilter/mkshape/gencode   A.J. Fisher
+// Command line: /www/usr/fisher/helpers/mkfilter -Bu -Bp -o 2 -a 2.0000000000e-03 4.0000000000e-02 -l
 
 #define NZEROS 4
 #define NPOLES 4
@@ -153,15 +168,23 @@ static float bandpass_filter (float input)
     return yv[4];
 }
 
+*/
+
 // Moving average -> low pass filter
-// FIXME: Shall be optimized too reduce computation costs in the ADC ISR.
+// TODO: Shall be optimized too reduce computation costs in the ADC ISR.
 #define BUF_SIZE 5
 struct MovingAverageBuffer {
-  float buf[BUF_SIZE];
-  size_t i;
-  bool initialized;
+    float buf[BUF_SIZE];
+    size_t i;
+    bool initialized;
 } ma_buf;
 
+/**
+ * Adds a given sample to the provided moving average buffer.
+ * 
+ * @param m     Instance of a moving average buffer.
+ * @param val   Sample to be added to the given moving average buffer.
+ */
 void addToMovingAverageBuffer (struct MovingAverageBuffer &m, float val) {
     if (!m.initialized) {
       for (size_t i = 0; i < BUF_SIZE; i++) {
@@ -174,6 +197,11 @@ void addToMovingAverageBuffer (struct MovingAverageBuffer &m, float val) {
     }
 }
 
+/**
+ * Computer the average of a given moving average buffer.
+ * 
+ * @return Average of the samples stored in the given moving average buffer.
+ */
 float getAverage (struct MovingAverageBuffer &m) {
    float sum = 0.0f;
    for (size_t i = 0; i < BUF_SIZE; i++) {
@@ -181,8 +209,6 @@ float getAverage (struct MovingAverageBuffer &m) {
    }
    return sum/((float)BUF_SIZE);
 }
-
-
 
 /* ADC interrupt routine.
  * 
@@ -194,35 +220,33 @@ void adc0_isr (void)
 {
 	// Acquiere the latest raw sample from the ADC.
 	heart_rate_signal_raw = ADC0_RA; // 2 bytes
-
-    #ifdef DEBUG
-	   //cout << pstr("RAW: ") << heart_rate_signal_raw << endl;
-    #endif
     
     /* The raw heart rate signal is low-pass-filtered
      * by a 32-slots hardware averager. */
 	addToMovingAverageBuffer(ma_buf, heart_rate_signal_raw);
 	heart_rate_signal_filtered = getAverage(ma_buf);
+
     //heart_rate_signal_filtered = bandpass_filter(heart_rate_signal_raw);
     
     #ifdef DEBUG
-    	//analogWrite(A9,getAverage(ma_buf));
     	analogWrite(A9, heart_rate_signal_filtered);
     #endif
 
-    if(status == RUNNING){
-      // Remember the sample in the next free slot of the measurement buffer.
-      if((0 <= measure_index) && (measure_index < MEASUREMENT_SIZE)){
-        measurement_buffer[measure_index] = heart_rate_signal_filtered;
-        ++measure_index;
-      }else{
-        done_recording = true;
-      }
-        
+    if (status == RUNNING) {
+        /* As long the heart rate monitor is running remember
+         * the sample in the next free slot of the measurement buffer. */
+        if ((0 <= measure_index) && (measure_index < MEASUREMENT_SIZE)) {
+            measurement_buffer[measure_index] = heart_rate_signal_filtered;
+            ++measure_index;
+
+        /* When all samples for a single measurement round
+         * are collected, claim the measurement as done. */
+        } else {
+            measurement_done = true;
+        }
     }
     
-    /* Set interrupt flag to notify the main loop that a new
-     * ADC sample is ready to be processed. */ 
+    // Notify the main loop that a new ADC sample is ready to be processed.
     adcInterrupt = true;
 }
 
@@ -499,12 +523,19 @@ static void writeSamplesToLogFile (void)
 //                           STABILIZATION                               //
 ///////////////////////////////////////////////////////////////////////////
 
-static bool is_stable = false;
-
+// Stabilization window buffer.
 static const size_t STAB_BUF_SIZE = 250;
 static uint16_t stabilizing_buffer[STAB_BUF_SIZE];
 static size_t stab_buf_i = 0;
 static size_t stab_buf_initialized = false;
+
+// Indicates whether the signal was already stable.
+static bool was_stable = true;
+
+// Stabilization delay.
+static const long STABILIZATION_DELAY = 1000; //ms
+static long last_time_stable = 0;
+static bool wait_for_stable = false;
 
 static void addToStabilizationBuffer(uint16_t sample)
 {
@@ -517,45 +548,47 @@ static void addToStabilizationBuffer(uint16_t sample)
     } else {
         stabilizing_buffer[stab_buf_i] = sample;
         stab_buf_i = (stab_buf_i + 1) % STAB_BUF_SIZE;
-        if(stab_buf_i == 0){
-          resetStabilization();
+
+        // Reset the stabilization heuristic each time the complete window is moved.
+        if (stab_buf_i == 0) {
+            resetStabilization();
         }
     }
 }
 
-static float mean (void)
-{  
-    float sum = 0;
+// Current maxima and minima of the stabilization window.
+static uint32_t max_stab_val = 0;
+static uint32_t min_stab_val = 5000;
+
+/**
+ * Checks whether the heart rate signal is too much noisy, i.e., if the signal is stable.
+ * 
+ * @return bool True iff the heart rate signal is stable and not such noisy, else false.
+ */
+static bool isSignalStable (void)
+{
+    // Compute the maxima and minima of the stabilization window.
     for (int i = 0; i < STAB_BUF_SIZE; i++) {
-        sum += stabilizing_buffer[i];
+        max_stab_val = max(max_stab_val, stabilizing_buffer[i]);
+        min_stab_val = min(min_stab_val, stabilizing_buffer[i]);
     }
 
-    return sum / STAB_BUF_SIZE;
+    // In case of too much noise, the signal is instable.
+    bool stable = (max_stab_val < 4000 && min_stab_val > 100);
+
+    //#ifdef DEBUG
+        //cout << stable << endl;
+        //cout << max_stab_val << " " << min_stab_val << endl;
+    //#endif
+
+    return stable;
 }
-
-static uint32_t variance (void)
-{
-  float m = mean();
-  float sum = 0;
-
-  for (int i = 0; i < STAB_BUF_SIZE; i++) {
-    sum += pow(stabilizing_buffer[i] - m, 2);
-  }
-
-  return sum / STAB_BUF_SIZE;
-}
-
-static long lastSignalStateTime = 0;
-static const long SIGNAL_STABILIZATION_DELAY = 200;
-static bool lastSignalState = false;
-static bool signalState = false;
-
-
 
 ///////////////////////////////////////////////////////////////////////////
 //                               GRAPHICS                                //
 ///////////////////////////////////////////////////////////////////////////
 
+// Next sample to be displayed on the heart rate monitor.
 static uint16_t gfx_sample;
 
 // The SPI chip-select for the ILI9341 TFT display is 10 (pin 10 of the Teensy).
@@ -567,7 +600,7 @@ static const int TFT_DC = 9;
 // The ILI9341 TFT display.
 static Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
 
-// Dimensions of the display
+// Dimensions of the display.
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
 #define GRAPH_COLOR ILI9341_YELLOW // TODO SET THIS
@@ -575,7 +608,7 @@ static Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
 #define BACKGROUND_COLOR ILI9341_BLACK
 
 
-// defines the number of readings / pixels that should be omitted
+// Number of readings / pixels that should be omitted.
 #define READING_GAP 2
 
 #define VALUE_COUNT  107
@@ -583,62 +616,76 @@ static Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
 #define SQUARE_LENGTH 7
 #define GRAPH_HEIGHT 160
 
-// screen buffer
+// Screen buffer.
 static int32_t previous_values[VALUE_COUNT];
 
-// color buffer. used to redraw the pixel
+// Color buffer. Used to redraw the pixel.
 static uint16_t previous_colors[VALUE_COUNT];
 
-// current position
+// Current position.
 static int cur_pos = 0;
 
+// Render delay.
 static const int DRAW_DELAY = 10;
 static int last_millis = 0;
 
+/**
+ * Draws a portion of the calibration grid according to a given range.
+ *
+ * @param from  Specifies the position from which the grid shall be rendered.
+ * @param to    Specifies the position to which the grid shall be rendered.
+ */
 static void draw_grid_intern (int from, int to)
 {
-
-
-
     tft.drawFastVLine(0, 0, GRAPH_HEIGHT, LINE_COLOR);
+
+    // Draw the vertical lines of the calibration grid.
     for (int i = from; i < to; i++) {
 
+        // Draw the thin vertical lines.
         if (i % SQUARE_LENGTH == 0) {
             tft.drawFastVLine(i, 0, GRAPH_HEIGHT, LINE_COLOR);
         }
 
+        // Draw the thick vertical lines.
         if (i % (SQUARE_LENGTH * 5) == 0) {
             tft.drawFastVLine(i+1, 0, GRAPH_HEIGHT, LINE_COLOR); 
         }
     }
 
+    // Draw the horizontal lines of the calibration grid.
     for (int i = 0; i < GRAPH_HEIGHT; i++) {
 
-    if (i % SQUARE_LENGTH == 0) {
-        tft.drawFastHLine(from, i, to-from, LINE_COLOR);
-    }
+        // Draw the thin horizontal lines.
+        if (i % SQUARE_LENGTH == 0) {
+            tft.drawFastHLine(from, i, to-from, LINE_COLOR);
+        }
 
-    if (i % (SQUARE_LENGTH * 5) == 0) {
-        tft.drawFastHLine(from, i+1, to-from, LINE_COLOR); 
+        // Draw the thick horizontal lines.
+        if (i % (SQUARE_LENGTH * 5) == 0) {
+            tft.drawFastHLine(from, i+1, to-from, LINE_COLOR); 
+        }
     }
-  }
 }
 
+/**
+ * Draw the complete calibration grid.
+ */
 static void draw_grid (void)
 {
-
     draw_grid_intern(0, SCREEN_WIDTH);
-
-    
 
     tft.drawLine(0,160,320,160, LINE_COLOR);
 }
 
+/**
+ * Computes the y-axis position of the next sample to be displayed.
+ * 
+ * @return int Y-axis position for the next sample.
+ */
 static int get_reading_y (void) {
 
     int reading = map(gfx_sample, 0, 4096, 160,0);
-    //reading-=20; // (160/2000)*650
-
     return constrain(reading,0,160-1);
 }
 
@@ -646,59 +693,59 @@ static int get_previous_color (int pos) {
     return 0xFFFF;
 }
 
-static int last = 0;
+/**
+ * Draw the samples of the heart rate signal on the TFT display.
+ */
+#ifdef DEBUG
+    static long lastTimeDrawn = 0;
+#endif
 static void draw_reading (void)
 {
-    // erase the oldest X readings
+    // Erase the oldest X readings.
     for(int i = cur_pos; i < READING_GAP +cur_pos; i++){
-        // actual position, mod
+        // actual position, mod.
         int imod = i % VALUE_COUNT;
 
-        // read from the previous_buffer
+        // Read from the previous_buffer.
         uint16_t pre_col = previous_colors[imod];
 
-        if(pre_col != -1){
-            // get the "i th" y position
+        if (pre_col != -1) {
+            
+            // Get the "i th" y position.
             int y = previous_values[imod];
             int x_pos = imod * 3;
 
-            // get the "i-1 th" y position
+            // Get the "i-1 th" y position.
             int prev_i = imod - 1;
-            if(prev_i < 0 ){
-              prev_i = 0;
+            if (prev_i < 0 ) {
+                prev_i = 0;
             }
 
             int prev_y = previous_values[prev_i];
             int prev_screen_x = prev_i * 3;
 
-            if (prev_y == -1  || y == -1) {
-
-            } else {
+            if (prev_y == -1  || y == -1) {}
+            else {
                 tft.drawLine(prev_screen_x, prev_y, x_pos, y, BACKGROUND_COLOR);    
             }
-
-            
         }        
     }
 
+    // Reconstruct the grid.
     draw_grid_intern((cur_pos-1)*3, (cur_pos+READING_GAP+1)*3);
 
-    // get the new reading
+    // Get the new reading.
     int reading = get_reading_y();
     previous_values[cur_pos] = reading;
 
-    // save the current color
+    // Save the current color.
     previous_colors[cur_pos] = get_previous_color(cur_pos);
 
-    // get the actual screen coordinate for x
+    // Get the actual screen coordinate for x.
     int screen_x = cur_pos * 3;
-
-    //tft.drawPixel((uint16_t)screen_x, (uint16_t)reading, GRAPH_COLOR);
-
     int prev_pos = cur_pos - 1;
     int prev_screen_x = prev_pos * 3;
 
-    // draw a line
     if (prev_pos < 0) {
         prev_pos = VALUE_COUNT-1;
         prev_screen_x = 0;
@@ -708,36 +755,28 @@ static void draw_reading (void)
         tft.drawLine(prev_screen_x, previous_values[prev_pos], screen_x, reading, GRAPH_COLOR);  
     }
 
-    /**
-    int prev_index = cur_pos -1;
-    if(prev_index < 0){
-      prev_index = SCREEN_WIDTH - prev_index - 1;
-    }
-    */
-   
-    //tft.drawLine(prev_index, previous_values[prev_index], cur_pos, reading, GRAPH_COLOR);
-
-    // do one step
+    // Do one step.
     cur_pos++;
     
-    // and wrap around if necessary
+    // And wrap around if necessary.
     if (cur_pos >= VALUE_COUNT) {
-      int diff = millis() - last;
+
         #ifdef DEBUG
-            cout << diff << endl;
+            long diff = millis() - lastTimeDrawn;
+            cout << diff << endl;            
+            lastTimeDrawn = millis();
         #endif
-        last = millis();
+
         cur_pos = 0;
-
-
-
     }    
 
     tft.fillRect(SCREEN_WIDTH-3, 0, 3, SCREEN_HEIGHT, BACKGROUND_COLOR);
     draw_grid_intern(SCREEN_WIDTH-3, SCREEN_WIDTH);
-    //tft.drawFastVLine(319, 0, GRAPH_HEIGHT, ILI9341_GREEN);
 }
 
+/**
+ * Draw the status bar of the heart rate monitor.
+ */
 static void draw_status_bar (void)
 {
     tft.setCursor(20,GRAPH_HEIGHT + 10);
@@ -745,6 +784,7 @@ static void draw_status_bar (void)
     tft.setTextSize(2);
     tft.print("ECG Status:");
 
+    // Update the status bar if the status of the heart rate monitor has changed.
     if (old_status != status) {
         old_status = status;
 
@@ -752,7 +792,7 @@ static void draw_status_bar (void)
 
         if (status == STOPPED) {
             tft.print("stopped");  
-        } else if (status == STARTED) {
+        } else if (status == STABILIZING) {
             tft.print("stabilizing");  
         } else if (status == RUNNING) {
             tft.print("running");  
@@ -769,80 +809,25 @@ static void graphics_setup (void)
         previous_colors[i] = -1;
     }
 
+    // Draw an empty calibration grid.
     cur_pos = 0;
-
     draw_grid();
 }
 
-static int counter = 0;
 static void graphics_update (void)
 {
+    /* Only if the heart rate measurment is running 
+     * and the signal is stable display the values. */
     if (status == RUNNING) {
-        if (last_millis + DRAW_DELAY < millis()) {
-            counter++;        
+        if (last_millis + DRAW_DELAY < millis()) {       
             draw_reading();
             last_millis = millis();
         }
     }
 
-    //if (counter % 10 == 0) {
-      draw_status_bar();
-    //}    
+    // Update the status bar.
+    draw_status_bar();
 }
-
-
-// get min and max
-uint32_t max_val = 0;
-uint32_t min_val = 5000;
-
-
-
-static bool isSignalStable (void)
-{
-
-    /*
-    uint32_t stdDev = (uint32_t)(sqrt(variance()) + 0.5f);
-
-    cout << stdDev << endl;
-
-    bool signalReading = (200 <= stdDev) && (stdDev <= 400);
-
-    if (signalReading != lastSignalState) {
-        lastSignalStateTime = millis();
-    }
-
-    if ((millis() - lastSignalStateTime) > SIGNAL_STABILIZATION_DELAY) {
-
-        if (signalReading != signalState) {
-            signalState = signalReading;
-            return signalState;
-        }
-    }
-
-    lastSignalState = signalReading;
-
-    */
-
-
-
-    for(int i = 0; i < STAB_BUF_SIZE; i++){
-      max_val = max(max_val, stabilizing_buffer[i]);
-      min_val = min(min_val, stabilizing_buffer[i]);
-    }
-
-    bool stable = (max_val < 4000 && min_val > 100);
-
-    cout << stable << endl;
-    //return stable;
-
-
-    //cout << max_val << " " << min_val << endl;
-
-
-    return stable;
-}
-
-
 
 ///////////////////////////////////////////////////////////////////////////
 //                                   SETUP                               //
@@ -907,8 +892,12 @@ void setup (void)
     #endif
 
     // Setup the heart rate signal acquisition.
-    heart_rate_acquisition_setup();    
+    setupHeartRateAcquisition();    
 }
+
+///////////////////////////////////////////////////////////////////////////
+//                                   RESET                               //
+///////////////////////////////////////////////////////////////////////////
 
 /**
  * Finalizes the heart rate measurement.
@@ -916,7 +905,9 @@ void setup (void)
 void finalize(void)
 {
     // Clear the ADC IMU interrupts.
+    noInterrupts();
     adcInterrupt = false;
+    interrupts();
 
     if (status == RUNNING) {
         // Create a new log file.
@@ -930,61 +921,52 @@ void finalize(void)
     }
 
     // Stop the measurement of heart rate.
-    set_state(STOPPED);
+    setStatus(STOPPED);
 
     // Finally, forget all the acquired samples.
     noInterrupts();
     measure_index = 0;
-    done_recording = false;
+    measurement_done = false;
     interrupts();
 
-    // reset the graph
+    // Reset the heart rate display.
     graphics_setup();
 }
 
+/**
+ * Resets the stable signal heuristic.
+ */
+static void resetStabilization(void)
+{
+  max_stab_val = 0;
+  min_stab_val = 5000;
+}
 
-bool was_stable = true;
-
-static void resetRecording(){
-
+/**
+ * Resets the recording of the heart rate signal.
+ */
+static void resetRecording(void)
+{
+    noInterrupts();
     // Clear the ADC IMU interrupts.
     adcInterrupt = false;
 
-    noInterrupts();
+    // Forget all the acquired samples.
     measure_index = 0;
-    done_recording = false;
-    
-
-
+    measurement_done = false;
     resetStabilization();
-
     interrupts();
 
-    // reset the graph
+    // Reset the heart rate display.
     graphics_setup();
 
-    set_state(STOPPED);
-}
-
-
-static void resetStabilization(){
-  max_val = 0;
-  min_val = 5000;
-
-  //stab_buf_initialized = false;
-
-
+    // Finally, stop the measurement of heart rate.
+    setStatus(STOPPED);
 }
 
 ///////////////////////////////////////////////////////////////////////////
 //                                 MAIN LOOP                             //
 ///////////////////////////////////////////////////////////////////////////
-
-
-
-int safe_delay = 1000;
-int safe_ts = 0;
-bool engaged = false;
 
 void loop (void)
 {
@@ -993,13 +975,12 @@ void loop (void)
 
         // Start a new measurement in case it is not running currently.
         if (status == STOPPED) {
-
-          // Claim the heart rate measurement shall start.
+          
           resetStabilization();
           resetRecording();
-          set_state(STARTED);
-          //old_status = status;
-          //status = STARTED;
+
+          // Claim the heart rate measurement shall start.
+          setStatus(STABILIZING);
 
         // Otherwise, abort the current heart rate measurement.
         } else {
@@ -1009,75 +990,72 @@ void loop (void)
         }
     }
 
-
     // Did there occur an ADC interrupt recently?
-    if (adcInterrupt) {
+    noInterrupts();
+    bool adcInterrupt_ = adcInterrupt;
+    interrupts();
+    if (adcInterrupt_) {
 
-            /* Clear the ADC interrupt flag.
-             * NOTE: The variable adcInterrupt is shared with the interrupt service routine adc0_isr.
-             *       However, we do not need to disable the interrupts temporarily since the variable
-             *       adcInterrupt is of boolean type; a bool occupies one single byte on the target
-             *       platform and it will be modified atomically in the single-core Freescale ARM CPU. */
+            // Clear the ADC interrupt flag.
+            noInterrupts();
             adcInterrupt = false;
+            interrupts();
 
             // Acquire the lastest filtered sample of the heart rate signal.
             uint16_t sample = getLatestFilteredHeartRateSample ();
             gfx_sample = sample; // Tell graphics about new sample.
-
-
             
-            /* add the sample to the stabilization buffer. */
+            /* Add the latest sample to the stabilization buffer. */
             addToStabilizationBuffer (sample);
-            
     }
 
     if (status != STOPPED) {
 
+        // Was a heart rate measurement recently started and we are waiting until it is stable?
+        if (status == STABILIZING) {
 
+            // Is the heart signal stable now?
+            if (isSignalStable() && !was_stable && !wait_for_stable) {
 
-        // Was a heart rate measurement recently started?
-        if (status == STARTED) {
-
-            // Is the signal already stable?
-            if (isSignalStable() && !was_stable && !engaged) {
-                //set_state(RUNNING);
-                //old_status = status;
-                //status = RUNNING;
-                //
-                engaged = true;
-                safe_ts = millis() + safe_delay;
+                // Wait a moment and check again if the signal is stable.
+                wait_for_stable = true;
+                last_time_stable = millis();
             }
 
-            if(engaged && safe_ts < millis()){
-                engaged = false;
-                if(isSignalStable()){
-                    set_state(RUNNING);
+            // Once the stabilization delay exceeded, check again if the signal is stable.
+            if(wait_for_stable && ((last_time_stable + STABILIZATION_DELAY) < millis())) {
 
+                // Reset stabilization delay.
+                wait_for_stable = false;
+
+                // Is the signal still stable?
+                if (isSignalStable()) {
+                    // If yes, start the heart reate measurement immediately.
+                    setStatus(RUNNING);
                 }
             }
-
-
-
-           
 
         // Is a heart rate measurement currently running?
         } else if (status == RUNNING) {
 
-
-          if(!isSignalStable()){
-            resetRecording();
-            set_state(STARTED);
-          }
-        
+            // Once the signal becomes instable wait until it is stable again.
+            if (!isSignalStable()) {
+                resetRecording();
+                // Claim that we are waiting until the signal of heart rate is stable again.
+                setStatus(STABILIZING);
+            }
 
             // Did we acquire all samples of the current measurement?
-            if (done_recording) {
+            noInterrupts();
+            bool measurement_done_ = measurement_done;
+            interrupts();
+            if (measurement_done_) {
                 // Finalize the heart rate measurement.
                 finalize();
             }
         }
-
-         was_stable = isSignalStable();
+        
+        was_stable = isSignalStable();
     }
 
     // Update the TFT graphics for the heart rate monitor.
