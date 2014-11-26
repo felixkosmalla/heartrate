@@ -516,6 +516,8 @@ static void addToStabilizationBuffer(uint16_t sample)
           resetStabilization();
         }
     }
+
+    cout << "stab" << endl;
 }
 
 static float mean (void)
