@@ -83,6 +83,7 @@ static const size_t MEASURE_DURATION = 30;      // 30sec
 
 // Buffer holds 30sec * 250Hz samples obtained during a measurement.
 static const size_t MEASUREMENT_SIZE = SAMPLING_RATE*MEASURE_DURATION;
+// indicated the current position of the recording
 static volatile size_t measure_index = 0;
 static volatile uint16_t measurement_buffer[MEASUREMENT_SIZE];
 
@@ -678,62 +679,81 @@ static Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
 #define LINE_COLOR ILI9341_RED
 #define BACKGROUND_COLOR ILI9341_BLACK
 
+#define TIME_SPAN (1600*2) // number of milliseconds which should be displayed, should be a multiple of 320 (or SCREEN_WIDTH) and 200
+#define NUMBER_OF_LARGE_SQUARES (TIME_SPAN / 200) // 8, 16; 200ms, see one square in the standard calibration on the website
+#define LARGE_SQUARE_WIDTH (SCREEN_WIDTH / NUMBER_OF_LARGE_SQUARES) // in pixels 40,20 -> 40 pixels are 200ms of data -> 50 values
+#define SMALL_SQUARE_LENGTH (LARGE_SQUARE_WIDTH / 5)
+#define SAMPLES_PER_SQUARE_AVAILABLE (200 / (1000 / SAMPLING_RATE)) // 50, that means we have to condense 50 samples to 40 pixels while retaining a line 
+#define SAMPLES_PER_SQUARE 10 // how much samples should be displayed in a square. should divide SQUARE_WIDTH without remainder
+#define SAMPLES_TO_SKIP (SAMPLES_PER_SQUARE_AVAILABLE / SAMPLES_PER_SQUARE) // number of samples to skip or average
+
+#define SCREEN_POS_TO_PIXEL (LARGE_SQUARE_WIDTH / SAMPLES_PER_SQUARE) // usage: screen_pos * SCREEN_POS_TO_PIXEL
 
 // Number of readings / pixels that should be omitted.
 #define READING_GAP 2
 
-#define VALUE_COUNT  107
+#define VALUE_COUNT  (SAMPLES_PER_SQUARE * NUMBER_OF_LARGE_SQUARES) // 10 * 8; 
 
-#define SQUARE_LENGTH 7
 #define GRAPH_HEIGHT 160
 
 // Screen buffer.
 static int32_t previous_values[VALUE_COUNT];
 
-// Current position.
-static int cur_pos = 0;
+// last drawn position.
+static int last_drawn_pos = 0; // this gets updated every loop and follows the measurement index
 
-// Render delay.
-static const int DRAW_DELAY = 10;
-static int last_millis = 0;
+// position on the screen
+static int screen_pos = 0; // range [0, VALUE_COUNT[
+
+
+
 
 /**
  * Draws a portion of the calibration grid according to a given range.
  *
- * @param from  Specifies the position from which the grid shall be rendered.
- * @param to    Specifies the position to which the grid shall be rendered.
+ * @param from  Specifies the position from which the grid shall be rendered. in px
+ * @param to    Specifies the position to which the grid shall be rendered. in px
  */
 static void draw_grid_intern (int from, int to)
 {
-    tft.drawFastVLine(0, 0, GRAPH_HEIGHT, LINE_COLOR);
+    /*
+    ASSERT(NUMBER_OF_LARGE_SQUARES == 8);
+    ASSERT(LARGE_SQUARE_WIDTH == 40);
+    ASSERT(SAMPLES_PER_SQUARE_AVAILABLE == 50);
+    ASSERT(SMALL_SQUARE_LENGTH == 8);
+    */
 
     // Draw the vertical lines of the calibration grid.
-    for (int i = from; i < to; i++) {
+    for (int i = from; i <= to; i++) {
 
         // Draw the thin vertical lines.
-        if (i % SQUARE_LENGTH == 0) {
-            tft.drawFastVLine(i, 0, GRAPH_HEIGHT, LINE_COLOR);
+        if (i % SMALL_SQUARE_LENGTH == 0) {
+            tft.drawFastVLine(i-1, 0, GRAPH_HEIGHT, LINE_COLOR);
         }
 
         // Draw the thick vertical lines.
-        if (i % (SQUARE_LENGTH * 5) == 0) {
-            tft.drawFastVLine(i+1, 0, GRAPH_HEIGHT, LINE_COLOR); 
+        if (i % (SMALL_SQUARE_LENGTH * 5) == 0) {
+            tft.drawFastVLine(i, 0, GRAPH_HEIGHT, LINE_COLOR); 
         }
     }
+
 
     // Draw the horizontal lines of the calibration grid.
     for (int i = 0; i < GRAPH_HEIGHT; i++) {
 
         // Draw the thin horizontal lines.
-        if (i % SQUARE_LENGTH == 0) {
+        if (i % SMALL_SQUARE_LENGTH == 0) {
             tft.drawFastHLine(from, i, to-from, LINE_COLOR);
         }
 
         // Draw the thick horizontal lines.
-        if (i % (SQUARE_LENGTH * 5) == 0) {
+        if (i % (SMALL_SQUARE_LENGTH * 5) == 0) {
             tft.drawFastHLine(from, i+1, to-from, LINE_COLOR); 
         }
     }
+
+
+
 }
 
 /**
@@ -744,6 +764,11 @@ static void draw_grid (void)
     draw_grid_intern(0, SCREEN_WIDTH);
 
     tft.drawLine(0,160,320,160, LINE_COLOR);
+}
+
+
+static int convert_reading(int reading){
+  return map(reading, 0, 4096, 160,0);
 }
 
 /**
@@ -765,6 +790,55 @@ static int get_reading_y (void) {
 #endif
 static void draw_reading (void)
 {
+
+
+
+    // check if we have samples to draw
+    if(measure_index - last_drawn_pos > 0){ 
+
+      // if so copy the measure index during a lock
+      noInterrupts();
+      int tmp_measure_index = measure_index;
+      interrupts();
+
+      // get the number of samples to draw
+      int num_samples_to_draw = tmp_measure_index - last_drawn_pos;
+      cout << num_samples_to_draw << " " << measure_index  << endl;
+
+      // draw the samples. we have to downsample here or just skip 
+      for(int i = 0; i < num_samples_to_draw; i+=SAMPLES_TO_SKIP){
+
+        int sample_index = i + last_drawn_pos;
+        int sample = measurement_buffer[sample_index];
+
+        // convert the sample value to draw
+        int y_pos = convert_reading(sample);
+
+        // delete the pixel beforehand
+        
+
+        int prev_y = previous_values[screen_pos];
+        if(prev_y != -1)
+          tft.drawPixel(screen_pos * SCREEN_POS_TO_PIXEL, prev_y, ILI9341_BLACK); 
+
+        // draw the pixel at the current position and continue
+        tft.drawPixel(screen_pos * SCREEN_POS_TO_PIXEL, y_pos, ILI9341_YELLOW);
+
+        previous_values[screen_pos] = y_pos;
+
+        screen_pos++;
+        if(screen_pos >= VALUE_COUNT){
+          screen_pos = 0;
+        }
+
+
+      }
+
+      last_drawn_pos = tmp_measure_index;
+
+    } 
+
+    /*
     // Erase the oldest X readings.
     for (int i = cur_pos; i < READING_GAP +cur_pos; i++) {
         // actual position, mod.
@@ -826,6 +900,12 @@ static void draw_reading (void)
 
     tft.fillRect(SCREEN_WIDTH-3, 0, 3, SCREEN_HEIGHT, BACKGROUND_COLOR);
     draw_grid_intern(SCREEN_WIDTH-3, SCREEN_WIDTH);
+    */
+}
+
+static void setup_status_bar(){
+
+
 }
 
 /**
@@ -863,19 +943,30 @@ static void graphics_setup (void)
     }
 
     // Draw an empty calibration grid.
-    cur_pos = 0;
+
+    last_drawn_pos = 0;
+    screen_pos = 0;
     draw_grid();
 }
 
 static void graphics_update (void)
 {
+
     /* Only if the heart rate measurment is running 
      * and the signal is stable display the values. */
+    
+     /*
     if (status == RUNNING) {
         if (last_millis + DRAW_DELAY < millis()) {       
             draw_reading();
             last_millis = millis();
         }
+    }
+    */
+
+    if(status == RUNNING && (measure_index - last_drawn_pos > 0) ){
+      draw_reading();
+      //last_millis = millis();
     }
 
     // Update the status bar.
@@ -1008,13 +1099,16 @@ static void resetRecording(void)
     measure_index = 0;
     measurement_done = false;
     resetStabilization();
+    setStatus(STOPPED);
     interrupts();
 
     // Reset the heart rate display.
     graphics_setup();
 
     // Finally, stop the measurement of heart rate.
-    setStatus(STOPPED);
+
+    ASSERT(measure_index ==0);
+
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1095,6 +1189,7 @@ void loop (void)
 
             // Once the signal becomes instable wait until it is stable again.
             if (!is_stable) {
+                //while(true);
                 resetRecording();
                 // Claim that we are waiting until the signal of heart rate is stable again.
                 setStatus(STABILIZING);
@@ -1115,4 +1210,39 @@ void loop (void)
 
     // Update the TFT graphics for the heart rate monitor.
     graphics_update();
+}
+
+
+
+// resets all variables
+void resetVariables(){
+    // Status of the heart rate monior.
+    status = STOPPED;
+    old_status = RUNNING;
+
+    // Signals whether the a measurment of the heart rate is done.
+    measurement_done = false;
+    measure_index = 0;
+
+    // moving average buffer reset
+    ma_buf.initialized = false;
+
+    // State variables used for the debouncing of the button state.
+    lastDebounceTime = 0;
+    lastButtonState = HIGH;
+    buttonState = 0;
+
+    // Stabilization window buffer.
+    stab_buf_i = 0;
+    stab_buf_initialized = false;
+    was_stable = true;
+    last_time_stable = 0;
+    wait_for_stable = false;
+    max_stab_val = 0;
+    min_stab_val = 5000;
+
+
+    // Graphics    
+    last_drawn_pos = 0;
+
 }
