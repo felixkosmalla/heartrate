@@ -18,7 +18,7 @@
                                  * ILI9341_t3 display and the SD card reader. */
 #include <SdFat.h>              // SdFat library is used to access the SD card.
 #include "Adafruit_GFX.h"       // Adafruit GFX library is used for the user interface.
-#include "Adafruit_ILI9341.h"   // ILI9341_t3 library defines the display functions.
+#include <Adafruit_ILI9341.h>         // ILI9341_t3 library defines the display functions.
 
 #include <assert.h>
 #include <math.h>
@@ -89,7 +89,67 @@ static volatile uint16_t measurement_buffer[MEASUREMENT_SIZE];
 
 // The latest acquired raw and filtered sample of the heart rate signal.
 static volatile uint16_t heart_rate_signal_raw;
-static volatile uint16_t heart_rate_signal_filtered;
+// static volatile uint16_t heart_rate_signal_filtered;
+
+static int heart_beat = 0;
+static bool saw_beat = false;
+static bool eyes_closed = false;
+static long last_time_eyes_closed = 0;
+static long rr_interval = 0;
+
+static const int HEART_BEAT_THRESHOLD = 6000;
+static const int EYES_CLOSED_DURATION = 200;
+
+static const int RR_INTERVAL_BUFFER_SIZE = 4;
+static long rr_interval_buf[RR_INTERVAL_BUFFER_SIZE] = {0};
+static size_t rr_interval_i = 0;
+static bool rr_interval_initialized = false;
+
+void addToRRIntervalBuffer (long rr_interval) {
+    if (!rr_interval_initialized) {
+      for (size_t i = 0; i < RR_INTERVAL_BUFFER_SIZE; i++) {
+        rr_interval_buf[i] = rr_interval;
+      }
+      rr_interval_initialized = true;
+    } else {
+      rr_interval_buf[rr_interval_i] = rr_interval;
+      rr_interval_i = (++rr_interval_i)%RR_INTERVAL_BUFFER_SIZE;
+    }
+}
+
+float getRRInterval (void) {
+   float sum = 0.0f;
+   for (size_t i = 0; i < RR_INTERVAL_BUFFER_SIZE; i++) {
+        sum += rr_interval_buf[i];
+   }
+   return sum/((float)RR_INTERVAL_BUFFER_SIZE);
+}
+
+void analyzeHearRateSignal (int sample)
+{
+    bool see_beat = sample > HEART_BEAT_THRESHOLD;
+
+    if (see_beat && !saw_beat && !eyes_closed) {
+        eyes_closed = true;
+        
+        ++heart_beat;
+
+        long current_time = millis();
+        rr_interval = current_time - last_time_eyes_closed;
+        addToRRIntervalBuffer(rr_interval);
+        last_time_eyes_closed = millis();
+
+        long rr = getRRInterval();
+        int bpm = (60000/rr);
+        cout << pstr("#Beats: ") << heart_beat << pstr(" R-R: ") << rr << pstr(" BPM: ") << bpm << endl;
+    }
+
+    if(eyes_closed && ((last_time_eyes_closed + EYES_CLOSED_DURATION) < millis())) {
+        eyes_closed = false;
+    }
+
+    saw_beat = see_beat;
+}
 
 // Forward declarations.
 static void adcInit(void);
@@ -97,100 +157,113 @@ static void adcCalibrate(void);
 static void pdbInit(void);
 static void resetStabilization(void);
 
-/*
+/* Digital filter designed by mkfilter/mkshape/gencode   A.J. Fisher
+   Command line: /www/usr/fisher/helpers/mkfilter -Bu -Lp -o 4 -a 6.0000000000e-02 0.0000000000e+00 -l */
 
+#define LP_NZEROS 4
+#define LP_NPOLES 4
+#define LP_GAIN   1.240141088e+03
+
+static float lp_xv[LP_NZEROS+1], lp_yv[LP_NPOLES+1];
+
+static float lowPassFilter(float input)
+{
+    lp_xv[0] = lp_xv[1]; lp_xv[1] = lp_xv[2]; lp_xv[2] = lp_xv[3]; lp_xv[3] = lp_xv[4]; 
+    lp_xv[4] = input / LP_GAIN;
+    lp_yv[0] = lp_yv[1]; lp_yv[1] = lp_yv[2]; lp_yv[2] = lp_yv[3]; lp_yv[3] = lp_yv[4]; 
+    lp_yv[4] = (lp_xv[0] + lp_xv[4]) + 4 * (lp_xv[1] + lp_xv[3]) + 6 * lp_xv[2]
+            + ( -0.3708142159 * lp_yv[0]) + (  1.8475509441 * lp_yv[1])
+            + ( -3.5071937247 * lp_yv[2]) + (  3.0175552387 * lp_yv[3]);
+    return lp_yv[4];     
+}
+
+/*
 FIR filter designed with
  http://t-filter.appspot.com
 
-sampling frequency: 250 Hz
+sampling frequency: 2000 Hz
 
-* 0 Hz - 25 Hz
-  gain = 1
-  desired ripple = 4 dB
-  actual ripple = 62.67389876611182 dB
+fixed point precision: 16 bits
 
-* 26 Hz - 125 Hz
+* 0 Hz - 5 Hz
   gain = 0
-  desired attenuation = -80 dB
-  actual attenuation = -65.33155455202755 dB
+  desired attenuation = -40 dB
+  actual attenuation = n/a
 
+* 6 Hz - 125 Hz
+  gain = 1
+  desired ripple = 5 dB
+  actual ripple = n/a
 */
 
-// #define LOWPASS25HZFILTER_TAP_NUM 10
+#define HIGHPASSFILTER_TAP_NUM 5
 
-// typedef struct {
-//   double history[LOWPASS25HZFILTER_TAP_NUM];
-//   unsigned int last_index;
-// } lowPass25HzFilter;
+typedef struct {
+  int history[HIGHPASSFILTER_TAP_NUM];
+  unsigned int last_index;
+} highPassFilter;
 
-// lowPass25HzFilter low_pass_filter;
+highPassFilter hpf;
 
-// void lowPass25HzFilter_init(lowPass25HzFilter* f);
-// void lowPass25HzFilter_put(lowPass25HzFilter* f, double input);
-// double lowPass25HzFilter_get(lowPass25HzFilter* f);
+void highPassFilter_init(highPassFilter* f);
+void highPassFilter_put(highPassFilter* f, int input);
+int highPassFilter_get(highPassFilter* f);
 
-// static double filter_taps[LOWPASS25HZFILTER_TAP_NUM] = {
-//   0.00044197310789849555,
-//   0.00040910722238711526,
-//   0.0005359479127676144,
-//   0.0006347682508973325,
-//   0.0006889350587178279,
-//   0.0006889350587178279,
-//   0.0006347682508973325,
-//   0.0005359479127676144,
-//   0.00040910722238711526,
-//   0.00044197310789849555
-// };
+static int filter_taps[HIGHPASSFILTER_TAP_NUM] = {
+  0,
+  0,
+  65536,
+  0,
+  0
+};
 
-// void lowPass25HzFilter_init(lowPass25HzFilter* f) {
-//   int i;
-//   for(i = 0; i < LOWPASS25HZFILTER_TAP_NUM; ++i)
-//     f->history[i] = 0;
-//   f->last_index = 0;
-// }
+void highPassFilter_init(highPassFilter* f) {
+  int i;
+  for(i = 0; i < HIGHPASSFILTER_TAP_NUM; ++i)
+    f->history[i] = 0;
+  f->last_index = 0;
+}
 
-// void lowPass25HzFilter_put(lowPass25HzFilter* f, double input) {
-//   f->history[f->last_index++] = input;
-//   if(f->last_index == LOWPASS25HZFILTER_TAP_NUM)
-//     f->last_index = 0;
-// }
+void highPassFilter_put(highPassFilter* f, int input) {
+  f->history[f->last_index++] = input;
+  if(f->last_index == HIGHPASSFILTER_TAP_NUM)
+    f->last_index = 0;
+}
 
-// double lowPass25HzFilter_get(lowPass25HzFilter* f) {
-//   double acc = 0;
-//   int index = f->last_index, i;
-//   for(i = 0; i < LOWPASS25HZFILTER_TAP_NUM; ++i) {
-//     index = index != 0 ? index-1 : LOWPASS25HZFILTER_TAP_NUM-1;
-//     acc += f->history[index] * filter_taps[i];
-//   };
-//   return acc;
-// }
+int highPassFilter_get(highPassFilter* f) {
+  long long acc = 0;
+  int index = f->last_index;
+    index = index != 0 ? index-1 : HIGHPASSFILTER_TAP_NUM-1;
+    acc += (long long)f->history[index] * filter_taps[0];
+    index = index != 0 ? index-1 : HIGHPASSFILTER_TAP_NUM-1;
+    acc += (long long)f->history[index] * filter_taps[1];
+    index = index != 0 ? index-1 : HIGHPASSFILTER_TAP_NUM-1;
+    acc += (long long)f->history[index] * filter_taps[2];
+    index = index != 0 ? index-1 : HIGHPASSFILTER_TAP_NUM-1;
+    acc += (long long)f->history[index] * filter_taps[3];
+    index = index != 0 ? index-1 : HIGHPASSFILTER_TAP_NUM-1;
+    acc += (long long)f->history[index] * filter_taps[4];
+  return acc >> 16;
+}
 
-/* Digital filter designed by mkfilter/mkshape/gencode   A.J. Fisher
-   Command line: /www/usr/fisher/helpers/mkfilter -Bu -Lp -o 10 -a 1.0000000000e-01 0.0000000000e+00 -l */
-
-#define NZEROS 10
-#define NPOLES 10
-#define GAIN   5.939718719e+05
-
-static float xv[NZEROS+1], yv[NPOLES+1];
-
-static float lowPass(float input)
+// Source: http://www.physik.uni-freiburg.de/~severin/ECG_QRS_Detection.pdf
+int derivate(int data)
 {
-        xv[0] = xv[1]; xv[1] = xv[2]; xv[2] = xv[3]; xv[3] = xv[4];
-        xv[4] = xv[5]; xv[5] = xv[6]; xv[6] = xv[7]; xv[7] = xv[8]; 
-        xv[8] = xv[9]; xv[9] = xv[10]; 
-        xv[10] = input / GAIN;
-        yv[0] = yv[1]; yv[1] = yv[2]; yv[2] = yv[3]; yv[3] = yv[4];
-        yv[4] = yv[5]; yv[5] = yv[6]; yv[6] = yv[7]; yv[7] = yv[8];
-        yv[8] = yv[9]; yv[9] = yv[10]; 
-        yv[10] =   (xv[0] + xv[10]) + 10 * (xv[1] + xv[9]) + 45 * (xv[2] + xv[8])
-                     + 120 * (xv[3] + xv[7]) + 210 * (xv[4] + xv[6]) + 252 * xv[5]
-                     + ( -0.0164796305 * yv[0]) + (  0.2309193459 * yv[1])
-                     + ( -1.4737279370 * yv[2]) + (  5.6470743441 * yv[3])
-                     + (-14.4056874260 * yv[4]) + ( 25.6017495970 * yv[5])
-                     + (-32.1597564880 * yv[6]) + ( 28.2587879000 * yv[7])
-                     + (-16.6721933230 * yv[8]) + (  5.9875896298 * yv[9]);
-        return yv[10];
+    int y, i;
+    static int x_derv[4];
+    
+    /*y = 1/8 (2x( nT) + x( nT - T) - x( nT - 3T) - 2x( nT - 4T))*/
+    y = (data << 1) + x_derv[3] - x_derv[1] - ( x_derv[0] << 1);
+    
+    y >>= 3;
+
+    for (i = 0; i < 3; i++) {
+        x_derv[i] = x_derv[i + 1];
+    }
+    
+    x_derv[3] = data;
+    
+    return(y);
 }
 
 /**
@@ -206,7 +279,8 @@ static void setupHeartRateAcquisition (void)
 	   analogWriteResolution(12);
     #endif
 
-    //lowPass25HzFilter_init(&low_pass_filter);
+    // Initial high pass filter.
+    highPassFilter_init(&hpf);
 
     // Initialize the Analog-To-Digital converter.
     #ifdef DEBUG
@@ -225,7 +299,7 @@ static void setupHeartRateAcquisition (void)
  * Returns the latest sample of the raw heart rate signal.
  * @return Raw heart rate sample in range [0..4095]
  */
-inline static float getLatestRawHeartRateSample (void)
+inline static float aqcuireHeartRateSignal (void)
 {
 	noInterrupts(); // Disable interrupt.
 	float heart_rate = heart_rate_signal_raw;
@@ -233,20 +307,21 @@ inline static float getLatestRawHeartRateSample (void)
 	return heart_rate;
 }
 
-/**
- * Returns the latest sample of the filtered heart rate signal.
- * @return Filtered heart rate sample in range [0..4095]
- */
-inline static float getLatestFilteredHeartRateSample (void)
-{
-    noInterrupts(); // Disable interrupt.
-    float heart_rate = heart_rate_signal_filtered;
-    interrupts();   // Enable interrupt again.
-    return heart_rate;
-}
+// /**
+//  * Returns the latest sample of the filtered heart rate signal.
+//  * @return Filtered heart rate sample in range [0..4095]
+//  */
+// inline static float getLatestFilteredHeartRateSample (void)
+// {
+//     noInterrupts(); // Disable interrupt.
+//     float heart_rate = heart_rate_signal_filtered;
+//     interrupts();   // Enable interrupt again.
+//     return heart_rate;
+// }
 
-// Moving average -> low pass filter
-#define BUF_SIZE 5
+// Moving average 
+// FIXME: refactor this, since the array is not resizable, that construction does not make sense.
+#define BUF_SIZE 32
 struct MovingAverageBuffer {
     float buf[BUF_SIZE];
     size_t i;
@@ -292,37 +367,9 @@ float getAverage (struct MovingAverageBuffer &m) {
 static volatile bool adcInterrupt = false;
 void adc0_isr (void)
 {
-	// Acquiere the latest raw sample from the ADC.
-	heart_rate_signal_raw = ADC0_RA; // 2 bytes
-    
-    /* The raw heart rate signal is low-pass-filtered
-     * by a 32-slots hardware averager. */
-	addToMovingAverageBuffer(ma_buf, heart_rate_signal_raw);
-	heart_rate_signal_filtered = getAverage(ma_buf);
-
-    //lowPass25HzFilter_put(&low_pass_filter, heart_rate_signal_raw);
-    //heart_rate_signal_filtered = lowPass25HzFilter_get(&low_pass_filter);
-    
-    heart_rate_signal_filtered = lowPass(heart_rate_signal_raw);
-    
-    #ifdef DEBUG
-    	analogWrite(A9, heart_rate_signal_filtered);
-    #endif
-
-    if (status == RUNNING) {
-        /* As long the heart rate monitor is running remember
-         * the sample in the next free slot of the measurement buffer. */
-        if ((0 <= measure_index) && (measure_index < MEASUREMENT_SIZE)) {
-            measurement_buffer[measure_index] = heart_rate_signal_filtered;
-            ++measure_index;
-
-        /* When all samples for a single measurement round
-         * are collected, claim the measurement as done. */
-        } else {
-            measurement_done = true;
-        }
-    }
-    
+	// Acquire the latest raw sample from the ADC.
+	heart_rate_signal_raw = ADC0_RA; // 2 bytes  
+ 
     // Notify the main loop that a new ADC sample is ready to be processed.
     adcInterrupt = true;
 }
@@ -771,16 +818,16 @@ static int convert_reading(int reading){
   return map(reading, 0, 4096, 160,0);
 }
 
-/**
- * Computes the y-axis position of the next sample to be displayed.
- * 
- * @return int Y-axis position for the next sample.
- */
-static int get_reading_y (void) {
+// /**
+//  * Computes the y-axis position of the next sample to be displayed.
+//  * 
+//  * @return int Y-axis position for the next sample.
+//  */
+// static int get_reading_y (void) {
 
-    int reading = map(gfx_sample, 0, 4096, 160,0);
-    return constrain(reading,0,160-1);
-}
+//     int reading = map(gfx_sample, 0, 4096, 160,0);
+//     return constrain(reading,0,160-1);
+// }
 
 /**
  * Draw the samples of the heart rate signal on the TFT display.
@@ -803,7 +850,10 @@ static void draw_reading (void)
 
       // get the number of samples to draw
       int num_samples_to_draw = tmp_measure_index - last_drawn_pos;
-      cout << num_samples_to_draw << " " << measure_index  << endl;
+
+      #ifdef DEBUG
+        //cout << num_samples_to_draw << " " << measure_index  << endl;
+      #endif
 
       // draw the samples. we have to downsample here or just skip 
       for(int i = 0; i < num_samples_to_draw; i+=SAMPLES_TO_SKIP){
@@ -913,14 +963,15 @@ static void setup_status_bar(){
  */
 static void draw_status_bar (void)
 {
-    tft.setCursor(20,GRAPH_HEIGHT + 10);
-    tft.setTextColor(0xFFFF);
-    tft.setTextSize(2);
-    tft.print("ECG Status:");
-
     // Update the status bar if the status of the heart rate monitor has changed.
     if (old_status != status) {
         old_status = status;
+
+        // Draw status text.
+        tft.setCursor(20,GRAPH_HEIGHT + 10);
+        tft.setTextColor(0xFFFF);
+        tft.setTextSize(2);
+        tft.print("ECG Status:");
 
         tft.fillRect(20+110+20, GRAPH_HEIGHT+10, 20+110+70, GRAPH_HEIGHT+20, BACKGROUND_COLOR);
 
@@ -943,7 +994,6 @@ static void graphics_setup (void)
     }
 
     // Draw an empty calibration grid.
-
     last_drawn_pos = 0;
     screen_pos = 0;
     draw_grid();
@@ -976,6 +1026,8 @@ static void graphics_update (void)
 ///////////////////////////////////////////////////////////////////////////
 //                                   SETUP                               //
 ///////////////////////////////////////////////////////////////////////////
+
+long last_time;
 
 void setup (void)
 {
@@ -1036,7 +1088,11 @@ void setup (void)
     #endif
 
     // Setup the heart rate signal acquisition.
-    setupHeartRateAcquisition();    
+    setupHeartRateAcquisition(); 
+
+    #ifdef DEBUG
+        last_time = millis();
+    #endif   
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1106,9 +1162,47 @@ static void resetRecording(void)
     graphics_setup();
 
     // Finally, stop the measurement of heart rate.
+    heart_beat = 0;
+    saw_beat = false;
+    eyes_closed = false;
+    last_time_eyes_closed = 0;
+    rr_interval_i = 0;
+    rr_interval_initialized = false;
 
     ASSERT(measure_index ==0);
 
+}
+
+// Resets all variables.
+void resetVariables(void)
+{
+    // Status of the heart rate monior.
+    status = STOPPED;
+    old_status = RUNNING;
+
+    // Signals whether the a measurment of the heart rate is done.
+    measurement_done = false;
+    measure_index = 0;
+
+    // moving average buffer reset
+    ma_buf.initialized = false;
+
+    // State variables used for the debouncing of the button state.
+    lastDebounceTime = 0;
+    lastButtonState = HIGH;
+    buttonState = 0;
+
+    // Stabilization window buffer.
+    stab_buf_i = 0;
+    stab_buf_initialized = false;
+    was_stable = true;
+    last_time_stable = 0;
+    wait_for_stable = false;
+    max_stab_val = 0;
+    min_stab_val = 5000;
+
+    // Graphics    
+    last_drawn_pos = 0;
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1117,13 +1211,19 @@ static void resetRecording(void)
 
 void loop (void)
 {
+    #ifdef DEBUG
+        long current_time = millis();
+        //cout << pstr("Runtime: ") << (current_time - last_time) << endl;
+        last_time = current_time;
+    #endif
+
     // Was the button pressed to either start or abort a measurement?
     if(wasButtonPressed()) {
 
         // Start a new measurement in case it is not running currently.
         if (status == STOPPED) {
           
-          resetStabilization();
+          //resetStabilization();
           resetRecording();
 
           // Claim the heart rate measurement shall start.
@@ -1137,23 +1237,65 @@ void loop (void)
         }
     }
 
+    static int sample_transformed = 0;
+
     // Did there occur an ADC interrupt recently?
     noInterrupts();
     bool adcInterrupt_ = adcInterrupt;
     interrupts();
     if (adcInterrupt_) {
 
-            // Clear the ADC interrupt flag.
-            noInterrupts();
-            adcInterrupt = false;
-            interrupts();
+        // Clear the ADC interrupt flag.
+        noInterrupts();
+        adcInterrupt = false;
+        interrupts();
 
-            // Acquire the lastest filtered sample of the heart rate signal.
-            uint16_t sample = getLatestFilteredHeartRateSample ();
-            gfx_sample = sample; // Tell graphics about new sample.
-            
-            /* Add the latest sample to the stabilization buffer. */
-            addToStabilizationBuffer (sample);
+        /* Acquire the lastest filtered sample of the heart rate signal.
+         * The this signal is already low-pass-filtered by a 32-slots
+         * hardware averager. */
+        uint16_t sample = aqcuireHeartRateSignal();
+
+        // Add the latest raw sample to the stabilization buffer.
+        addToStabilizationBuffer (sample);
+        
+        //////////////// LINEAR FILTERING STAGE ////////////////     
+
+        // IIR (Butterworth, 4-pole, cutoff 15Hz) Low Pass Filtering
+        float sample_low_passed = lowPassFilter(sample);
+        highPassFilter_put(&hpf, sample_low_passed);   
+
+        // FIR (cutoff 5Hz) High Pass Filtering
+        int sample_high_passed = highPassFilter_get(&hpf);
+        int sample_filtered = sample_high_passed;
+
+        /////////// NON LINEAR TRANSFORMATION STAGE ////////////
+        
+        // Compute Slope of the Bandpass Filtered Signal -> Five-Point Derviation
+        int sample_derivated = derivate (sample_high_passed);
+        // Square the Slope -> Turns the signal positive.
+        int sample_squared = sample_derivated*sample_derivated;
+
+        // Moving Window Integration
+        addToMovingAverageBuffer(ma_buf, sample_squared);
+        sample_transformed = (int)(getAverage(ma_buf) + 0.5f);
+        
+        #ifdef DEBUG
+            analogWrite(A9, sample_transformed);
+        #endif
+        
+        if (status == RUNNING) {
+            /* As long the heart rate monitor is running remember
+             * the sample in the next free slot of the measurement buffer. */
+            if ((0 <= measure_index) && (measure_index < MEASUREMENT_SIZE)) {
+                measurement_buffer[measure_index] = sample_filtered;
+                ++measure_index;
+
+            /* When all samples for a single measurement round
+             * are collected, claim the measurement as done. */
+            } else {
+                measurement_done = true;
+            }
+        }
     }
 
     if (status != STOPPED) {
@@ -1193,13 +1335,18 @@ void loop (void)
                 resetRecording();
                 // Claim that we are waiting until the signal of heart rate is stable again.
                 setStatus(STABILIZING);
-            }
+            } 
 
+            //cout << sample_transformed << endl;
+            analyzeHearRateSignal (sample_transformed);
+
+            // // Did we acquire all samples of the current measurement?
+            // noInterrupts();
+            // bool measurement_done_ = measurement_done;
+            // interrupts();
+            
             // Did we acquire all samples of the current measurement?
-            noInterrupts();
-            bool measurement_done_ = measurement_done;
-            interrupts();
-            if (measurement_done_) {
+            if (measurement_done) {
                 // Finalize the heart rate measurement.
                 finalize();
             }
@@ -1210,39 +1357,4 @@ void loop (void)
 
     // Update the TFT graphics for the heart rate monitor.
     graphics_update();
-}
-
-
-
-// resets all variables
-void resetVariables(){
-    // Status of the heart rate monior.
-    status = STOPPED;
-    old_status = RUNNING;
-
-    // Signals whether the a measurment of the heart rate is done.
-    measurement_done = false;
-    measure_index = 0;
-
-    // moving average buffer reset
-    ma_buf.initialized = false;
-
-    // State variables used for the debouncing of the button state.
-    lastDebounceTime = 0;
-    lastButtonState = HIGH;
-    buttonState = 0;
-
-    // Stabilization window buffer.
-    stab_buf_i = 0;
-    stab_buf_initialized = false;
-    was_stable = true;
-    last_time_stable = 0;
-    wait_for_stable = false;
-    max_stab_val = 0;
-    min_stab_val = 5000;
-
-
-    // Graphics    
-    last_drawn_pos = 0;
-
 }
