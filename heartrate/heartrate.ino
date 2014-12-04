@@ -18,7 +18,7 @@
                                  * ILI9341_t3 display and the SD card reader. */
 #include <SdFat.h>              // SdFat library is used to access the SD card.
 #include "Adafruit_GFX.h"       // Adafruit GFX library is used for the user interface.
-#include <Adafruit_ILI9341.h>         // ILI9341_t3 library defines the display functions.
+#include <ILI9341_t3.h>         // ILI9341_t3 library defines the display functions.
 
 #include <assert.h>
 #include <math.h>
@@ -263,7 +263,7 @@ int derivate(int data)
     
     x_derv[3] = data;
     
-    return(y);
+    return y;
 }
 
 /**
@@ -717,7 +717,7 @@ static const int TFT_CS = 10;
 static const int TFT_DC = 9;
 
 // The ILI9341 TFT display.
-static Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
+static ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC);
 
 // Dimensions of the display.
 #define SCREEN_WIDTH 320
@@ -1262,9 +1262,9 @@ void loop (void)
 
         // IIR (Butterworth, 4-pole, cutoff 15Hz) Low Pass Filtering
         float sample_low_passed = lowPassFilter(sample);
-        highPassFilter_put(&hpf, sample_low_passed);   
 
         // FIR (cutoff 5Hz) High Pass Filtering
+        highPassFilter_put(&hpf, sample_low_passed);
         int sample_high_passed = highPassFilter_get(&hpf);
         int sample_filtered = sample_high_passed;
 
