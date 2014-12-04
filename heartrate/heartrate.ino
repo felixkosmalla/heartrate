@@ -16,9 +16,10 @@
 
 #include "SPI.h"                /* SPI library is used to communicate with the
                                  * ILI9341_t3 display and the SD card reader. */
-#include <SdFat.h>              // SdFat library is used to access the SD card.
-#include "Adafruit_GFX.h"       // Adafruit GFX library is used for the user interface.
+//#include "Adafruit_GFX.h"       // Adafruit GFX library is used for the user interface.
 #include <ILI9341_t3.h>         // ILI9341_t3 library defines the display functions.
+#include <SdFat.h>              // SdFat library is used to access the SD card.
+
 
 #include <assert.h>
 #include <math.h>
@@ -732,7 +733,7 @@ static ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC);
 #define SMALL_SQUARE_LENGTH (LARGE_SQUARE_WIDTH / 5)
 #define SAMPLES_PER_SQUARE_AVAILABLE (200 / (1000 / SAMPLING_RATE)) // 50, that means we have to condense 50 samples to 40 pixels while retaining a line 
 #define SAMPLES_PER_SQUARE 10 // how much samples should be displayed in a square. should divide SQUARE_WIDTH without remainder
-#define SAMPLES_TO_SKIP (SAMPLES_PER_SQUARE_AVAILABLE / SAMPLES_PER_SQUARE) // number of samples to skip or average
+#define SAMPLES_TO_SKIP ((SAMPLES_PER_SQUARE_AVAILABLE / SAMPLES_PER_SQUARE)+0) // number of samples to skip or average
 
 #define SCREEN_POS_TO_PIXEL (LARGE_SQUARE_WIDTH / SAMPLES_PER_SQUARE) // usage: screen_pos * SCREEN_POS_TO_PIXEL
 
@@ -769,6 +770,9 @@ static void draw_grid_intern (int from, int to)
     ASSERT(SAMPLES_PER_SQUARE_AVAILABLE == 50);
     ASSERT(SMALL_SQUARE_LENGTH == 8);
     */
+
+    from = max(0, from);
+    to = min(to, SCREEN_WIDTH-1);
 
     // Draw the vertical lines of the calibration grid.
     for (int i = from; i <= to; i++) {
@@ -835,6 +839,11 @@ static int convert_reading(int reading){
 #ifdef DEBUG
     static long lastTimeDrawn = 0;
 #endif
+
+int current_sample_drawn_index = 0;
+
+
+
 static void draw_reading (void)
 {
 
@@ -856,29 +865,87 @@ static void draw_reading (void)
       #endif
 
       // draw the samples. we have to downsample here or just skip 
-      for(int i = 0; i < num_samples_to_draw; i+=SAMPLES_TO_SKIP){
+      for(int i = 0; i < num_samples_to_draw; i++){
 
-        int sample_index = i + last_drawn_pos;
-        int sample = measurement_buffer[sample_index];
+        if(current_sample_drawn_index == 0){
 
-        // convert the sample value to draw
-        int y_pos = convert_reading(sample);
+          int sample_index = i + last_drawn_pos;
+          int sample = measurement_buffer[sample_index];
 
-        // delete the pixel beforehand
-        
+          // previous y
+          int previous_screen_pos = screen_pos-1;
 
-        int prev_y = previous_values[screen_pos];
-        if(prev_y != -1)
-          tft.drawPixel(screen_pos * SCREEN_POS_TO_PIXEL, prev_y, ILI9341_BLACK); 
 
-        // draw the pixel at the current position and continue
-        tft.drawPixel(screen_pos * SCREEN_POS_TO_PIXEL, y_pos, ILI9341_YELLOW);
+          // convert the sample value to draw
+          int y_pos = convert_reading(sample);
 
-        previous_values[screen_pos] = y_pos;
+          // delete the pixel beforehand
+          
+          /*
+          int prev_y = previous_values[screen_pos];
+          if(prev_y != -1) // if we have a previous pixel
+            tft.drawPixel(screen_pos * SCREEN_POS_TO_PIXEL, prev_y, ILI9341_BLACK); 
+          */
 
-        screen_pos++;
-        if(screen_pos >= VALUE_COUNT){
-          screen_pos = 0;
+          // see if we can draw a line
+          if(previous_screen_pos >= 0 && previous_values[previous_screen_pos] > 0){
+
+            // delete the previous (future / right) line
+            // see if there is a line to the right
+
+            int future_screen_pos = screen_pos+1;
+
+            int delete_previous_segment = 0;
+            int delete_start = 0;
+            int delete_stop = 0;
+
+            // if we have a future point that does not wrap
+            if(future_screen_pos != VALUE_COUNT && previous_values[future_screen_pos] > 0){ 
+              delete_previous_segment = 1;
+              delete_start = screen_pos;
+              delete_stop = future_screen_pos;
+            }
+
+            // if the future point would wrap around
+            if(future_screen_pos == VALUE_COUNT){
+              delete_previous_segment = 1;
+              delete_start = 0;
+              delete_stop = 1;                            
+            }
+
+            if(delete_previous_segment == 1){
+              tft.drawLine(delete_start * SCREEN_POS_TO_PIXEL, previous_values[delete_start], delete_stop * SCREEN_POS_TO_PIXEL, previous_values[delete_stop], ILI9341_BLACK);                 
+              draw_grid_intern((delete_start) * SCREEN_POS_TO_PIXEL, (delete_stop+1) * SCREEN_POS_TO_PIXEL);
+              
+            }
+
+
+
+            
+            
+            
+
+            
+
+            tft.drawLine(previous_screen_pos * SCREEN_POS_TO_PIXEL, previous_values[previous_screen_pos], screen_pos * SCREEN_POS_TO_PIXEL, y_pos, ILI9341_YELLOW);
+          }
+
+          // draw the pixel at the current position and continue
+          //tft.drawPixel(screen_pos * SCREEN_POS_TO_PIXEL, y_pos, ILI9341_YELLOW);
+
+          previous_values[screen_pos] = y_pos;
+
+          screen_pos++;
+          if(screen_pos >= VALUE_COUNT){
+            screen_pos = 0;
+          }
+
+
+        }
+
+        current_sample_drawn_index++;
+        if(current_sample_drawn_index == SAMPLES_TO_SKIP -1){
+          current_sample_drawn_index = 0;
         }
 
 
@@ -1056,6 +1123,7 @@ void setup (void)
     #endif
     tft.begin();    
     tft.setRotation(3);
+
     
     graphics_setup();   
     #ifdef DEBUG
@@ -1076,9 +1144,11 @@ void setup (void)
      * during the initialization of the SD card reader. */
     digitalWrite(TFT_CS, HIGH);
 
+    
     if (!sd.begin(SD_CS, SPI_HALF_SPEED))
         sd.initErrorHalt();
-
+    
+  
     /* Now, both TFT screen and SD card are ready to communicate with
      * the Teensy. Set chip select port of the TFT to LOW, such that
      * the SPI library can drive the pin correctly. */
@@ -1092,7 +1162,10 @@ void setup (void)
 
     #ifdef DEBUG
         last_time = millis();
-    #endif   
+    #endif  
+
+
+    
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1213,7 +1286,13 @@ void loop (void)
 {
     #ifdef DEBUG
         long current_time = millis();
-        //cout << pstr("Runtime: ") << (current_time - last_time) << endl;
+        long runtime = (current_time - last_time);
+
+        if(runtime > 3){
+          cout << pstr("Runtime: ") << (current_time - last_time) << endl;  
+        }
+
+        
         last_time = current_time;
     #endif
 
