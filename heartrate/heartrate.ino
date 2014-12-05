@@ -732,7 +732,7 @@ static void sound_loop(){
 
 static void beep(short duration)
 {
-  analogWrite(PIEZO_TRANSDUCER, 127);
+  analogWrite(PIEZO_TRANSDUCER, 220);
   stop_beep_at = millis() + duration;
 }
 
@@ -980,10 +980,21 @@ static void draw_reading (void)
    
 }
 
+
 #define G_BPM_WIDTH 70
+
+// colors
 #define C_GREY 0x632c
 #define C_WHITE 0xffff
 #define C_GREEN 0x07e2
+
+
+// labels
+#define G_LABEL_PADDING_Y 10
+#define G_LABEL_PADDING_X 10
+#define G_LABEL_VALUE_MARGIN 100
+#define G_ECG_Y GRAPH_HEIGHT + G_LABEL_PADDING_Y
+#define G_RR_Y G_ECG_Y + G_LABEL_PADDING_Y
 
 static void get_boundingbox(char* text, int scale, int *width, int *height){
   int len = strlen(text);
@@ -1049,6 +1060,16 @@ static void do_beat(){
 
 static int old_bpm = 0;
 
+static void draw_label(char* label, int y){
+  tft.setCursor(G_BPM_WIDTH+G_LABEL_PADDING_X, y);
+  tft.setTextColor(C_GREY);
+  tft.setTextSize(2);
+  tft.print(label);
+}
+
+
+
+
 static void s_draw_bpm(int bpm){
 
   if(bpm < 40 || old_bpm == bpm){
@@ -1105,12 +1126,12 @@ static void draw_status_bar (void)
         old_status = status;
 
         // Draw status text.
-        tft.setCursor(20,GRAPH_HEIGHT + 10);
+        tft.setCursor(40,GRAPH_HEIGHT + 10);
         tft.setTextColor(0xFFFF);
         tft.setTextSize(2);
         tft.print("ECG Status:");
 
-        tft.fillRect(20+110+20, GRAPH_HEIGHT+10, 20+110+70, GRAPH_HEIGHT+20, BACKGROUND_COLOR);
+        tft.fillRect(40+110+20, GRAPH_HEIGHT+10, 40+110+70, GRAPH_HEIGHT+20, BACKGROUND_COLOR);
 
         if (status == STOPPED) {
             tft.print("stopped");  
