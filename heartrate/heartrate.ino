@@ -76,6 +76,10 @@ static void setStatus(Status s)
   interrupts();
 }
 
+// Forward declarations
+static void do_beat();
+
+
 // Signals whether the a measurment of the heart rate is done.
 static volatile bool measurement_done = false;
 
@@ -92,11 +96,12 @@ static volatile uint16_t measurement_buffer[MEASUREMENT_SIZE];
 static volatile uint16_t heart_rate_signal_raw;
 // static volatile uint16_t heart_rate_signal_filtered;
 
-static int heart_beat = 0;
+static int heart_beat = 0; // TODO rename, e.g. hear_beat_count
 static bool saw_beat = false;
 static bool eyes_closed = false;
 static long last_time_eyes_closed = 0;
 static long rr_interval = 0;
+static int current_bpm = 0;
 
 static const int HEART_BEAT_THRESHOLD = 6000;
 static const int EYES_CLOSED_DURATION = 200;
@@ -135,14 +140,16 @@ void analyzeHearRateSignal (int sample)
         
         ++heart_beat;
 
+        do_beat();
+
         long current_time = millis();
         rr_interval = current_time - last_time_eyes_closed;
         addToRRIntervalBuffer(rr_interval);
         last_time_eyes_closed = millis();
 
         long rr = getRRInterval();
-        int bpm = (60000/rr);
-        cout << pstr("#Beats: ") << heart_beat << pstr(" R-R: ") << rr << pstr(" BPM: ") << bpm << endl;
+        current_bpm = (60000/rr);
+        //cout << pstr("#Beats: ") << heart_beat << pstr(" R-R: ") << rr << pstr(" BPM: ") << bpm << endl;
     }
 
     if(eyes_closed && ((last_time_eyes_closed + EYES_CLOSED_DURATION) < millis())) {
@@ -704,6 +711,32 @@ static bool isSignalStable (void)
     return stable;
 }
 
+
+///////////////////////////////////////////////////////////////////////////
+//                               SOUND                                   //
+///////////////////////////////////////////////////////////////////////////
+
+
+
+
+static const int PIEZO_TRANSDUCER = 20;
+
+static int stop_beep_at = 0;
+
+static void sound_loop(){
+  if(millis() > stop_beep_at){
+    analogWrite(PIEZO_TRANSDUCER, 0);
+  }
+}
+
+
+static void beep(short duration)
+{
+  analogWrite(PIEZO_TRANSDUCER, 127);
+  stop_beep_at = millis() + duration;
+}
+
+
 ///////////////////////////////////////////////////////////////////////////
 //                               GRAPHICS                                //
 ///////////////////////////////////////////////////////////////////////////
@@ -737,10 +770,9 @@ static ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC);
 
 #define SCREEN_POS_TO_PIXEL (LARGE_SQUARE_WIDTH / SAMPLES_PER_SQUARE) // usage: screen_pos * SCREEN_POS_TO_PIXEL
 
-// Number of readings / pixels that should be omitted.
-#define READING_GAP 2
-
+// number of values which are actually displayed one at a time
 #define VALUE_COUNT  (SAMPLES_PER_SQUARE * NUMBER_OF_LARGE_SQUARES) // 10 * 8; 
+
 
 #define GRAPH_HEIGHT 160
 
@@ -814,12 +846,12 @@ static void draw_grid (void)
 {
     draw_grid_intern(0, SCREEN_WIDTH);
 
-    tft.drawLine(0,160,320,160, LINE_COLOR);
+    tft.drawLine(0,GRAPH_HEIGHT,SCREEN_WIDTH,GRAPH_HEIGHT, LINE_COLOR);
 }
 
 
 static int convert_reading(int reading){
-  return map(reading, 0, 4096, 160,0);
+  return map(reading, 0, 4096, GRAPH_HEIGHT,0);
 }
 
 // /**
@@ -879,20 +911,14 @@ static void draw_reading (void)
           // convert the sample value to draw
           int y_pos = convert_reading(sample);
 
-          // delete the pixel beforehand
+       
           
-          /*
-          int prev_y = previous_values[screen_pos];
-          if(prev_y != -1) // if we have a previous pixel
-            tft.drawPixel(screen_pos * SCREEN_POS_TO_PIXEL, prev_y, ILI9341_BLACK); 
-          */
-
+       
           // see if we can draw a line
           if(previous_screen_pos >= 0 && previous_values[previous_screen_pos] > 0){
 
             // delete the previous (future / right) line
             // see if there is a line to the right
-
             int future_screen_pos = screen_pos+1;
 
             int delete_previous_segment = 0;
@@ -913,6 +939,7 @@ static void draw_reading (void)
               delete_stop = 1;                            
             }
 
+            // do the actual deletion
             if(delete_previous_segment == 1){
               tft.drawLine(delete_start * SCREEN_POS_TO_PIXEL, previous_values[delete_start], delete_stop * SCREEN_POS_TO_PIXEL, previous_values[delete_stop], ILI9341_BLACK);                 
               draw_grid_intern((delete_start) * SCREEN_POS_TO_PIXEL, (delete_stop+1) * SCREEN_POS_TO_PIXEL);
@@ -921,12 +948,7 @@ static void draw_reading (void)
 
 
 
-            
-            
-            
-
-            
-
+            // and draw the new reading
             tft.drawLine(previous_screen_pos * SCREEN_POS_TO_PIXEL, previous_values[previous_screen_pos], screen_pos * SCREEN_POS_TO_PIXEL, y_pos, ILI9341_YELLOW);
           }
 
@@ -955,72 +977,120 @@ static void draw_reading (void)
 
     } 
 
-    /*
-    // Erase the oldest X readings.
-    for (int i = cur_pos; i < READING_GAP +cur_pos; i++) {
-        // actual position, mod.
-        int imod = i % VALUE_COUNT;
+   
+}
 
-        // Get the "i th" y position.
-        int y = previous_values[imod];
-        int x_pos = imod * 3;
+#define G_BPM_WIDTH 70
+#define C_GREY 0x632c
+#define C_WHITE 0xffff
+#define C_GREEN 0x07e2
 
-        // Get the "i-1 th" y position.
-        int prev_i = imod - 1;
-        if (prev_i < 0 ) {
-            prev_i = 0;
-        }
+static void get_boundingbox(char* text, int scale, int *width, int *height){
+  int len = strlen(text);
+  *width = len*6*scale;
+  *height = 7*scale;
+}
 
-        int prev_y = previous_values[prev_i];
-        int prev_screen_x = prev_i * 3;
 
-        if (prev_y != -1 && y != -1) {
-            tft.drawLine(prev_screen_x, prev_y, x_pos, y, BACKGROUND_COLOR);    
-        }        
-    }
 
-    // Reconstruct the grid.
-    draw_grid_intern((cur_pos-1)*3, (cur_pos+READING_GAP+1)*3);
+static void delete_text_(char* text, int scale, int x, int y, uint16_t bg_color){
+  // get the bounding box
+  int width, height;  
+  get_boundingbox(text, scale, &width, &height);
+  tft.fillRect(x, y, width, height, bg_color);
+}
 
-    // Get the new reading.
-    int reading = get_reading_y();
-    previous_values[cur_pos] = reading;
 
-    // Get the actual screen coordinate for x.
-    int screen_x = cur_pos * 3;
-    int prev_pos = cur_pos - 1;
-    int prev_screen_x = prev_pos * 3;
+static void delete_text(char* text, int scale, int x, int y, uint16_t bg_color){
+  delete_text_(text, scale, x, y, bg_color);
+}
 
-    if (prev_pos < 0) {
-        prev_pos = VALUE_COUNT-1;
-        prev_screen_x = 0;
-    }
-    
-    if (previous_values[prev_pos] != -1) {
-        tft.drawLine(prev_screen_x, previous_values[prev_pos], screen_x, reading, GRAPH_COLOR);  
-    }
+static void delete_text(int num, int scale, int x, int y, uint16_t bg_color){
+  // convert chart pointer
+  char buf[50];
 
-    // Do one step.
-    cur_pos++;
-    
-    // And wrap around if necessary.
-    if (cur_pos >= VALUE_COUNT) {
+  sprintf(buf, "%d", num);
+  delete_text(buf, scale, x, y, bg_color);
+}
 
-        #ifdef DEBUG
-            long diff = millis() - lastTimeDrawn;
-            cout << diff << endl;            
-            lastTimeDrawn = millis();
-        #endif
+static int old_beat_status = 0;
+#define BEAT_LENGTH 50
+static int turn_beat_off_at = 0;
 
-        cur_pos = 0;
-    }    
 
-    tft.fillRect(SCREEN_WIDTH-3, 0, 3, SCREEN_HEIGHT, BACKGROUND_COLOR);
-    draw_grid_intern(SCREEN_WIDTH-3, SCREEN_WIDTH);
-    */
+static void s_draw_beat(int on){
+
+  if(old_beat_status == on){
+    return;
+  }
+  old_beat_status = on;
+
+  int x = 25;
+  int y = SCREEN_HEIGHT-65;
+  int radius = 8;
+
+  if(on){
+    tft.fillCircle(x,y, radius, C_GREEN);  
+  }else{
+    tft.fillCircle(x,y, radius, C_GREY);  
+    tft.drawCircle(x,y, radius, C_GREEN);  
+  }
+  
+
+}
+
+static void do_beat(){
+  s_draw_beat(1);
+  beep(BEAT_LENGTH);
+  turn_beat_off_at = millis() + BEAT_LENGTH;
+}
+
+
+
+static int old_bpm = 0;
+
+static void s_draw_bpm(int bpm){
+
+  if(bpm < 40 || old_bpm == bpm){
+    return;
+  }
+
+
+  int cur_x = 8;
+  int cur_y = SCREEN_HEIGHT- 50;
+
+  int scale = 3;
+  
+  delete_text(old_bpm, scale, cur_x, cur_y, C_GREY);
+  tft.setTextSize(scale);
+  tft.setCursor(cur_x, cur_y);
+  tft.setTextColor(C_WHITE);
+  tft.print(bpm);
+
+  old_bpm = bpm;
+
+}
+
+static void beat_draw_loop(){
+  if(turn_beat_off_at < millis()){
+    s_draw_beat(0);
+  }
+
+  s_draw_bpm(current_bpm);
 }
 
 static void setup_status_bar(){
+
+  tft.fillRect(0,GRAPH_HEIGHT, G_BPM_WIDTH, SCREEN_HEIGHT - GRAPH_HEIGHT, C_GREY);
+
+  tft.setCursor(8, SCREEN_HEIGHT- 16);
+  tft.setTextColor(C_WHITE);
+  tft.setTextSize(2);
+  tft.print("BPM");
+
+
+  s_draw_bpm(0);
+  s_draw_beat(0);
 
 
 }
@@ -1064,6 +1134,8 @@ static void graphics_setup (void)
     last_drawn_pos = 0;
     screen_pos = 0;
     draw_grid();
+
+    setup_status_bar();
 }
 
 static void graphics_update (void)
@@ -1113,6 +1185,7 @@ void setup (void)
     /* Setup button to start and abort a heart rate measurement.
      * Enable the internal pull-up resistor of the pin connected with the button. */
     pinMode(BUTTON, INPUT_PULLUP);
+    pinMode(PIEZO_TRANSDUCER, OUTPUT);
     #ifdef DEBUG
         cout << pstr("done") << endl;
     #endif
@@ -1407,6 +1480,7 @@ void loop (void)
 
         // Is a heart rate measurement currently running?
         } else if (status == RUNNING) {
+            beat_draw_loop();
 
             // Once the signal becomes instable wait until it is stable again.
             if (!is_stable) {
@@ -1436,4 +1510,5 @@ void loop (void)
 
     // Update the TFT graphics for the heart rate monitor.
     graphics_update();
+    sound_loop();
 }
