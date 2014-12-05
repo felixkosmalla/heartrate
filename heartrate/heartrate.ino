@@ -55,7 +55,7 @@
 //                       HEART RATE SIGNAL PROCESSING                    //
 ///////////////////////////////////////////////////////////////////////////
 
-typedef enum Status { STOPPED, STABILIZING, RUNNING };
+typedef enum Status { STOPPED, STABILIZING, RUNNING};
 
 /* Status of the heart rate monior.
  *
@@ -131,7 +131,7 @@ float getRRInterval (void) {
    return sum/((float)RR_INTERVAL_BUFFER_SIZE);
 }
 
-void analyzeHearRateSignal (int sample)
+void analyzeHeartRateSignal (int sample)
 {
     bool see_beat = sample > HEART_BEAT_THRESHOLD;
 
@@ -149,7 +149,13 @@ void analyzeHearRateSignal (int sample)
 
         long rr = getRRInterval();
         current_bpm = (60000/rr);
-        //cout << pstr("#Beats: ") << heart_beat << pstr(" R-R: ") << rr << pstr(" BPM: ") << bpm << endl;
+
+        if (current_bpm < 60) {
+          // TODO: BRADYCARDIA detected
+        } else if (current_bpm > 110) {
+          // TODO: TACHYCARDIA detected
+        }
+
     }
 
     if(eyes_closed && ((last_time_eyes_closed + EYES_CLOSED_DURATION) < millis())) {
@@ -716,11 +722,7 @@ static bool isSignalStable (void)
 //                               SOUND                                   //
 ///////////////////////////////////////////////////////////////////////////
 
-
-
-
 static const int PIEZO_TRANSDUCER = 20;
-
 static int stop_beep_at = 0;
 
 static void sound_loop(){
@@ -729,13 +731,11 @@ static void sound_loop(){
   }
 }
 
-
 static void beep(short duration)
 {
   analogWrite(PIEZO_TRANSDUCER, 220);
   stop_beep_at = millis() + duration;
 }
-
 
 ///////////////////////////////////////////////////////////////////////////
 //                               GRAPHICS                                //
@@ -760,7 +760,7 @@ static ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC);
 #define LINE_COLOR ILI9341_RED
 #define BACKGROUND_COLOR ILI9341_BLACK
 
-#define TIME_SPAN (1600*2) // number of milliseconds which should be displayed, should be a multiple of 320 (or SCREEN_WIDTH) and 200
+#define TIME_SPAN (800*2) // number of milliseconds which should be displayed, should be a multiple of 320 (or SCREEN_WIDTH) and 200
 #define NUMBER_OF_LARGE_SQUARES (TIME_SPAN / 200) // 8, 16; 200ms, see one square in the standard calibration on the website
 #define LARGE_SQUARE_WIDTH (SCREEN_WIDTH / NUMBER_OF_LARGE_SQUARES) // in pixels 40,20 -> 40 pixels are 200ms of data -> 50 values
 #define SMALL_SQUARE_LENGTH (LARGE_SQUARE_WIDTH / 5)
@@ -1036,8 +1036,8 @@ static void s_draw_beat(int on){
   }
   old_beat_status = on;
 
-  int x = 25;
-  int y = SCREEN_HEIGHT-65;
+  int x = 35;
+  int y = SCREEN_HEIGHT-68;
   int radius = 8;
 
   if(on){
@@ -1104,7 +1104,7 @@ static void setup_status_bar(){
 
   tft.fillRect(0,GRAPH_HEIGHT, G_BPM_WIDTH, SCREEN_HEIGHT - GRAPH_HEIGHT, C_GREY);
 
-  tft.setCursor(8, SCREEN_HEIGHT- 16);
+  tft.setCursor(16, SCREEN_HEIGHT - 16);
   tft.setTextColor(C_WHITE);
   tft.setTextSize(2);
   tft.print("BPM");
@@ -1126,15 +1126,15 @@ static void draw_status_bar (void)
         old_status = status;
 
         // Draw status text.
-        tft.setCursor(40,GRAPH_HEIGHT + 10);
+        tft.setCursor(80,GRAPH_HEIGHT + 10);
         tft.setTextColor(0xFFFF);
         tft.setTextSize(2);
-        tft.print("ECG Status:");
+        tft.print("ECG:");
 
-        tft.fillRect(40+110+20, GRAPH_HEIGHT+10, 40+110+70, GRAPH_HEIGHT+20, BACKGROUND_COLOR);
+        tft.fillRect(40+88, GRAPH_HEIGHT+10, 40+88+60, 25, BACKGROUND_COLOR);
 
         if (status == STOPPED) {
-            tft.print("stopped");  
+            tft.print("stopped");
         } else if (status == STABILIZING) {
             tft.print("stabilizing");  
         } else if (status == RUNNING) {
@@ -1512,7 +1512,7 @@ void loop (void)
             } 
 
             //cout << sample_transformed << endl;
-            analyzeHearRateSignal (sample_transformed);
+            analyzeHeartRateSignal (sample_transformed);
 
             // // Did we acquire all samples of the current measurement?
             // noInterrupts();
