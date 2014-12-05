@@ -1382,6 +1382,8 @@ static void graphics_loop (void)
 
 void init_graphical_buttons(){
 
+  current_active_gbutton = 0;
+
   // iterate over all buttons
   for(int i = 0; i < GRAPHICAL_BUTTON_NUM; i++){
     g_buttons[i].has_focus = 0;
@@ -1610,6 +1612,7 @@ void finalize(void)
     interrupts();
 
     // Reset the heart rate display.
+    init_graphical_buttons();
     graphics_setup();
 }
 
