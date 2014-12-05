@@ -130,6 +130,10 @@ static bool rr_interval_initialized = false;
 #define BUTTON_LABEL_SIZE 2
 #define BUTTON_PADDING 5
 
+#define POTENTIOMETER 22
+
+static int current_pot_reading = 0;
+
 
 typedef struct{
   char* label;    // label of the button
@@ -141,11 +145,14 @@ typedef struct{
   int was_pressed;
 } graphical_button;
 
-#define GRAPHICAL_BUTTON_NUM 2
+#define GRAPHICAL_BUTTON_NUM 4
 
 
 #define GBT_REC 0
 #define GBT_LOAD 1
+#define GBT_SELECT_REC 2
+#define GBT_ABORT_SELECT 3
+
 
 
 
@@ -171,6 +178,8 @@ static void setup_recall(void);
 void init_graphical_buttons();
 void draw_button(int index);
 void hide_button(int index);
+void hide_all_buttons();
+bool wasVButtonPressed(int index);
 
 
 ///////////////////////////////////////////////////////////////////////////
@@ -888,6 +897,7 @@ static bool isSignalStable (void)
 ///////////////////////////////////////////////////////////////////////////
 
 static const int PIEZO_TRANSDUCER = 20;
+
 static int stop_beep_at = 0;
 
 static void sound_loop(){
@@ -1276,6 +1286,9 @@ static void setup_status_bar(){
 
   draw_label("RR", G_RR_Y);
 
+  // draw the buttons
+  hide_all_buttons();
+
   g_buttons[GBT_LOAD].visible = true;
   g_buttons[GBT_REC].visible = true;
   g_buttons[GBT_REC].has_focus = true;
@@ -1327,16 +1340,130 @@ static void graphics_setup (void)
     setup_status_bar();
 }
 
+
+void hide_all_buttons(){
+  for(int i = 0; i < GRAPHICAL_BUTTON_NUM; i++){
+    g_buttons[i].visible = false;
+  }
+}
+
+
+#define MAX_NUM_OF_FILES 30
+static int filec;
+static char filenames[MAX_NUM_OF_FILES][11];
+
+
+static int get_file_list(){
+  // DUMMY
+
+  filec =0;
+
+  SdBaseFile* vwd = sd.vwd();
+  vwd->rewind();
+
+  dir_t dir;
+
+  while(1){
+
+    while (1) {
+      if (vwd->read(&dir, sizeof(dir)) != sizeof(dir)) return 0;
+      if (dir.name[0] == DIR_NAME_FREE) return 0;
+
+      // skip deleted entry and entries for . and  ..
+      if (dir.name[0] != DIR_NAME_DELETED && dir.name[0] != 0x7E && dir.name[0] != '.'
+        && DIR_IS_FILE(&dir)) break;
+    }
+
+    int w = 0;
+
+    if(filec >= MAX_NUM_OF_FILES){
+      return 0;
+    }
+
+    ASSERT(filec < MAX_NUM_OF_FILES);
+
+    for (uint8_t i = 0; i < 11; i++) {
+      if (dir.name[i] == ' ')continue;
+      if (i == 8) {
+        filenames[filec][w] = '.';
+       w++;
+      }
+      filenames[filec][w] = dir.name[i];
+      w++;
+    }
+
+
+    filec++;
+
+    
+  }
+
+
+
+}
+
+
+
+
+
 static void setup_sd_menu(){
+  // draw the menu for the SD card
+
+  // reset the screen
+  tft.fillScreen(C_BLACK);
+  hide_all_buttons();
+
+  // draw the buttons
+  g_buttons[GBT_SELECT_REC].visible = true;
+  g_buttons[GBT_SELECT_REC].has_focus = true;
+  g_buttons[GBT_ABORT_SELECT].visible = true;
+  current_active_gbutton = GBT_SELECT_REC;
+
+  draw_button(GBT_SELECT_REC);
+  draw_button(GBT_ABORT_SELECT);
+
+
+  get_file_list();
+
+  for(int i = 0; i < filec; i++){
+    cout << filenames[i] << endl;
+  }
+
+
+
+
 
 }
 
 static void sd_menu_loop(){
-  
+  if(wasVButtonPressed(GBT_ABORT_SELECT)){
+    // Reset the heart rate display.
+    init_graphical_buttons();
+    graphics_setup();
+    setStatus(STOPPED);
+    return;
+  }
+
+  if(wasVButtonPressed(GBT_SELECT_REC)){
+    setStatus(RECALL);
+    return;
+  }
+
+
+
+  //current_pot_reading = analogRead(POTENTIOMETER);
+
+
+
+
+
+  cout << current_pot_reading << endl;
+
+
 }
 
 static void setup_recall(){
-
+  tft.fillScreen(ILI9341_YELLOW);
 }
 
 static void recall_loop(){
@@ -1403,6 +1530,18 @@ void init_graphical_buttons(){
   g_buttons[GBT_LOAD].label = "load";
   g_buttons[GBT_LOAD].x = SCREEN_WIDTH - 70;
   g_buttons[GBT_LOAD].y = SCREEN_HEIGHT - 65;
+
+
+  // select recording
+  g_buttons[GBT_SELECT_REC].label = "select";
+  g_buttons[GBT_SELECT_REC].x = SCREEN_WIDTH - 90;
+  g_buttons[GBT_SELECT_REC].y = 30;
+
+  // abort recording selection
+  g_buttons[GBT_ABORT_SELECT].label = "cancel";
+  g_buttons[GBT_ABORT_SELECT].x = SCREEN_WIDTH - 90;
+  g_buttons[GBT_ABORT_SELECT].y = 65;
+
   
 
 
@@ -1468,10 +1607,25 @@ void button_loop(){
       draw_button(current_active_gbutton);
     }
 
-    current_active_gbutton++;
-    if(current_active_gbutton >= GRAPHICAL_BUTTON_NUM){
-      current_active_gbutton = 0;
+    bool found_visible_button = false;
+    int counter = 0;
+
+    // skip buttons which are currently not visible
+    while(!found_visible_button){
+      counter++;
+
+      current_active_gbutton++;
+      if(current_active_gbutton >= GRAPHICAL_BUTTON_NUM){
+        current_active_gbutton = 0;
+      }
+
+
+      if(counter > GRAPHICAL_BUTTON_NUM || g_buttons[current_active_gbutton].visible == 1){
+        break;
+      }
     }
+
+
 
     g_buttons[current_active_gbutton].has_focus = true;
     g_buttons[current_active_gbutton].was_pressed = false;
@@ -1521,6 +1675,7 @@ void setup (void)
     }
     
     pinMode(PIEZO_TRANSDUCER, OUTPUT);
+    pinMode(POTENTIOMETER, INPUT);
     #ifdef DEBUG
         cout << pstr("done") << endl;
     #endif
@@ -1726,13 +1881,9 @@ void loop (void)
             // Finalize the heart rate measurement.
             finalize();
         }
-
-        cout << "rec" << endl;
     }
 
-    if(wasVButtonPressed(GBT_LOAD)){
-      cout << "load" << endl;
-    }
+
 
     static int sample_transformed = 0;
 
@@ -1852,6 +2003,14 @@ void loop (void)
         
         was_stable = is_stable;
     }
+
+
+    if(status == STOPPED){
+      if(wasVButtonPressed(GBT_LOAD)){
+        setStatus(SD_MENU);
+      }
+    }
+
 
 
     // Update the TFT graphics for the heart rate monitor.
