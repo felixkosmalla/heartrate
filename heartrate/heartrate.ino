@@ -24,60 +24,16 @@
 #include <assert.h>
 #include <math.h>
 
+
 ///////////////////////////////////////////////////////////////////////////
-//                                DEBUG                                  //
+//                       CONSTANTS / ENUMS / ETC                         //
 ///////////////////////////////////////////////////////////////////////////
 
 #define DEBUG // Uncomment to generate debug output on the serial port.
+#define SILENT // Uncomment if you want sound
 
-#ifdef DEBUG
-    // Serial monitor output stream.
-    static ArduinoOutStream cout(Serial);
-
-    // Assertion Macro
-    // Adopted version from http://www.acm.uiuc.edu/sigops/roll_your_own/2.a.html
-    static void ASSERT_FAILURE(const char *exp, const char *file, 
-        const char *function, int line)
-    {
-        cout << pstr("Assertion failed at ") << file << pstr(":")
-             << line << pstr(" in function ") << function << endl;
-        cout << pstr("Condition: ") << exp; 
-        while (true) {} // halt
-    } 
-
-    #define ASSERT(exp)  if ((exp)) ; \
-            else ASSERT_FAILURE(#exp, __FILE__, __FUNCTION__, __LINE__);
-#else
-    #define ASSERT(exp)
-#endif
-
-///////////////////////////////////////////////////////////////////////////
-//                       HEART RATE SIGNAL PROCESSING                    //
-///////////////////////////////////////////////////////////////////////////
-
-typedef enum Status { STOPPED, STABILIZING, RUNNING};
-
-/* Status of the heart rate monior.
- *
- * STOPPED: No heart rate measurement running.
- * STABILIZING: Wait until signal is stable before starting the heart rate measurement.
- * RUNNING: Heart rate measruement is running, signal is stable. */ 
-static Status status = STOPPED, old_status = RUNNING;
-
-/**
- * Changes the status of the heart rate monitor while saving the previous one. 
- * @param s New status of the heart rate monitor. (STOPPED, STABILIZING or RUNNING)
- */
-static void setStatus(Status s)
-{
-  noInterrupts();
-  old_status = status;
-  status = s;
-  interrupts();
-}
-
-// Forward declarations
-static void do_beat();
+// the different states of the system
+typedef enum Status { STOPPED, STABILIZING, RUNNING, SD_MENU, RECALL};
 
 
 // Signals whether the a measurment of the heart rate is done.
@@ -100,7 +56,8 @@ static int heart_beat = 0; // TODO rename, e.g. hear_beat_count
 static bool saw_beat = false;
 static bool eyes_closed = false;
 static long last_time_eyes_closed = 0;
-static long rr_interval = 0;
+static long rr_interval = 0; // holds the rr of the current reading
+static long current_rr = 0;   // holds the averaged rr
 static int current_bpm = 0;
 
 static const int HEART_BEAT_THRESHOLD = 6000;
@@ -110,6 +67,177 @@ static const int RR_INTERVAL_BUFFER_SIZE = 4;
 static long rr_interval_buf[RR_INTERVAL_BUFFER_SIZE] = {0};
 static size_t rr_interval_i = 0;
 static bool rr_interval_initialized = false;
+
+#define MIN_BPM 30 // this is the smallest reasonable BPM, everything under that will not be displayed
+
+
+// GRAPHICS
+// Dimensions of the display.
+#define SCREEN_WIDTH 320
+#define SCREEN_HEIGHT 240
+#define GRAPH_HEIGHT 160
+
+#define TIME_SPAN (800*2) // number of milliseconds which should be displayed, should be a multiple of 320 (or SCREEN_WIDTH) and 200
+#define NUMBER_OF_LARGE_SQUARES (TIME_SPAN / 200) // 8, 16; 200ms, see one square in the standard calibration on the website
+#define LARGE_SQUARE_WIDTH (SCREEN_WIDTH / NUMBER_OF_LARGE_SQUARES) // in pixels 40,20 -> 40 pixels are 200ms of data -> 50 values
+#define SMALL_SQUARE_LENGTH (LARGE_SQUARE_WIDTH / 5)
+#define SAMPLES_PER_SQUARE_AVAILABLE (200 / (1000 / SAMPLING_RATE)) // 50, that means we have to condense 50 samples to 40 pixels while retaining a line 
+#define SAMPLES_PER_SQUARE 10 // how much samples should be displayed in a square. should divide SQUARE_WIDTH without remainder
+#define SAMPLES_TO_SKIP ((SAMPLES_PER_SQUARE_AVAILABLE / SAMPLES_PER_SQUARE)+0) // number of samples to skip or average
+
+#define SCREEN_POS_TO_PIXEL (LARGE_SQUARE_WIDTH / SAMPLES_PER_SQUARE) // usage: screen_pos * SCREEN_POS_TO_PIXEL
+
+// number of values which are actually displayed one at a time
+#define VALUE_COUNT  (SAMPLES_PER_SQUARE * NUMBER_OF_LARGE_SQUARES) // 10 * 8; 
+
+
+
+
+#define G_BPM_WIDTH 70
+
+// colors
+#define C_GREY 0x632c
+#define C_LIGHT_GREY 0xB596
+#define C_WHITE 0xffff
+#define C_GREEN 0x07e2
+#define C_BLACK 0x0000
+#define C_WHITE 0xffff
+
+// semantic colors
+#define C_LABEL C_LIGHT_GREY
+#define C_STATUS_BAR C_BLACK
+#define C_TEXT_COLOR C_WHITE
+#define GRAPH_COLOR ILI9341_YELLOW // TODO SET THIS
+#define LINE_COLOR ILI9341_RED
+#define BACKGROUND_COLOR ILI9341_BLACK
+
+// labels
+#define G_LABEL_SIZE 2
+#define G_LABEL_PADDING_Y 25
+#define G_LABEL_PADDING_X 10
+#define G_LABEL_VALUE_MARGIN G_BPM_WIDTH +  60
+#define G_ECG_Y GRAPH_HEIGHT + 10
+#define G_RR_Y G_ECG_Y + G_LABEL_PADDING_Y
+
+
+
+
+///////////////////////////////////////////////////////////////////////////
+//                       FORWARD DECLARATIONS                            //
+///////////////////////////////////////////////////////////////////////////
+
+static void do_beat();
+static void adcInit(void);
+static void adcCalibrate(void);
+static void pdbInit(void);
+static void resetStabilization(void);
+static void setup_sd_menu(void);
+static void setup_recall(void);
+
+
+
+///////////////////////////////////////////////////////////////////////////
+//                       HELPER FUNCTIONS                                //
+///////////////////////////////////////////////////////////////////////////
+
+char* getVerboseStatus(Status s){
+  switch (s) {
+      case STOPPED:
+        return "stopped";
+        break;
+      case STABILIZING:
+        return "stabilizing";
+        break;
+      case RUNNING:
+        return "running";
+        break;
+      case SD_MENU:
+        return "menu";
+        break;
+      case RECALL:
+        return "recall";
+      default:
+        return "-";
+        
+  }
+}
+
+
+
+///////////////////////////////////////////////////////////////////////////
+//                                DEBUG                                  //
+///////////////////////////////////////////////////////////////////////////
+
+
+#ifdef DEBUG
+    // Serial monitor output stream.
+    static ArduinoOutStream cout(Serial);
+
+    // Assertion Macro
+    // Adopted version from http://www.acm.uiuc.edu/sigops/roll_your_own/2.a.html
+    static void ASSERT_FAILURE(const char *exp, const char *file, 
+        const char *function, int line)
+    {
+        cout << pstr("Assertion failed at ") << file << pstr(":")
+             << line << pstr(" in function ") << function << endl;
+        cout << pstr("Condition: ") << exp; 
+        while (true) {} // halt
+    } 
+
+    #define ASSERT(exp)  if ((exp)) ; \
+            else ASSERT_FAILURE(#exp, __FILE__, __FUNCTION__, __LINE__);
+#else
+    #define ASSERT(exp)
+#endif
+
+
+
+
+
+
+///////////////////////////////////////////////////////////////////////////
+//                       HEART RATE SIGNAL PROCESSING                    //
+///////////////////////////////////////////////////////////////////////////
+
+
+
+/* Status of the heart rate monior.
+ *
+ * STOPPED: No heart rate measurement running.
+ * STABILIZING: Wait until signal is stable before starting the heart rate measurement.
+ * RUNNING: Heart rate measruement is running, signal is stable. */ 
+static Status status = STOPPED, old_status = RUNNING;
+
+/**
+ * Changes the status of the heart rate monitor while saving the previous one. 
+ * @param s New status of the heart rate monitor. (STOPPED, STABILIZING or RUNNING)
+ */
+static void setStatus(Status s)
+{
+  noInterrupts();
+  old_status = status;
+  status = s;
+
+  // call the setup routine for every state
+  switch (s) {
+    case STOPPED:
+    case STABILIZING:
+    case RUNNING:
+      break;
+    case SD_MENU:
+      setup_sd_menu();
+      break;
+    case RECALL:
+      setup_recall();
+    default:
+        break;
+      
+}
+
+  interrupts();
+}
+
+
 
 void addToRRIntervalBuffer (long rr_interval) {
     if (!rr_interval_initialized) {
@@ -147,8 +275,8 @@ void analyzeHeartRateSignal (int sample)
         addToRRIntervalBuffer(rr_interval);
         last_time_eyes_closed = millis();
 
-        long rr = getRRInterval();
-        current_bpm = (60000/rr);
+        current_rr = getRRInterval();
+        current_bpm = (60000/current_rr);
 
         if (current_bpm < 60) {
           // TODO: BRADYCARDIA detected
@@ -165,11 +293,7 @@ void analyzeHeartRateSignal (int sample)
     saw_beat = see_beat;
 }
 
-// Forward declarations.
-static void adcInit(void);
-static void adcCalibrate(void);
-static void pdbInit(void);
-static void resetStabilization(void);
+
 
 /* Digital filter designed by mkfilter/mkshape/gencode   A.J. Fisher
    Command line: /www/usr/fisher/helpers/mkfilter -Bu -Lp -o 4 -a 6.0000000000e-02 0.0000000000e+00 -l */
@@ -733,8 +857,10 @@ static void sound_loop(){
 
 static void beep(short duration)
 {
+  #ifndef SILENT
   analogWrite(PIEZO_TRANSDUCER, 220);
   stop_beep_at = millis() + duration;
+  #endif
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -752,29 +878,6 @@ static const int TFT_DC = 9;
 
 // The ILI9341 TFT display.
 static ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC);
-
-// Dimensions of the display.
-#define SCREEN_WIDTH 320
-#define SCREEN_HEIGHT 240
-#define GRAPH_COLOR ILI9341_YELLOW // TODO SET THIS
-#define LINE_COLOR ILI9341_RED
-#define BACKGROUND_COLOR ILI9341_BLACK
-
-#define TIME_SPAN (800*2) // number of milliseconds which should be displayed, should be a multiple of 320 (or SCREEN_WIDTH) and 200
-#define NUMBER_OF_LARGE_SQUARES (TIME_SPAN / 200) // 8, 16; 200ms, see one square in the standard calibration on the website
-#define LARGE_SQUARE_WIDTH (SCREEN_WIDTH / NUMBER_OF_LARGE_SQUARES) // in pixels 40,20 -> 40 pixels are 200ms of data -> 50 values
-#define SMALL_SQUARE_LENGTH (LARGE_SQUARE_WIDTH / 5)
-#define SAMPLES_PER_SQUARE_AVAILABLE (200 / (1000 / SAMPLING_RATE)) // 50, that means we have to condense 50 samples to 40 pixels while retaining a line 
-#define SAMPLES_PER_SQUARE 10 // how much samples should be displayed in a square. should divide SQUARE_WIDTH without remainder
-#define SAMPLES_TO_SKIP ((SAMPLES_PER_SQUARE_AVAILABLE / SAMPLES_PER_SQUARE)+0) // number of samples to skip or average
-
-#define SCREEN_POS_TO_PIXEL (LARGE_SQUARE_WIDTH / SAMPLES_PER_SQUARE) // usage: screen_pos * SCREEN_POS_TO_PIXEL
-
-// number of values which are actually displayed one at a time
-#define VALUE_COUNT  (SAMPLES_PER_SQUARE * NUMBER_OF_LARGE_SQUARES) // 10 * 8; 
-
-
-#define GRAPH_HEIGHT 160
 
 // Screen buffer.
 static int32_t previous_values[VALUE_COUNT];
@@ -981,25 +1084,12 @@ static void draw_reading (void)
 }
 
 
-#define G_BPM_WIDTH 70
 
-// colors
-#define C_GREY 0x632c
-#define C_WHITE 0xffff
-#define C_GREEN 0x07e2
-
-
-// labels
-#define G_LABEL_PADDING_Y 10
-#define G_LABEL_PADDING_X 10
-#define G_LABEL_VALUE_MARGIN 100
-#define G_ECG_Y GRAPH_HEIGHT + G_LABEL_PADDING_Y
-#define G_RR_Y G_ECG_Y + G_LABEL_PADDING_Y
 
 static void get_boundingbox(char* text, int scale, int *width, int *height){
   int len = strlen(text);
   *width = len*6*scale;
-  *height = 7*scale;
+  *height = (7+1)*scale;
 }
 
 
@@ -1025,7 +1115,7 @@ static void delete_text(int num, int scale, int x, int y, uint16_t bg_color){
 }
 
 static int old_beat_status = 0;
-#define BEAT_LENGTH 50
+#define BEAT_LENGTH 80
 static int turn_beat_off_at = 0;
 
 
@@ -1050,29 +1140,55 @@ static void s_draw_beat(int on){
 
 }
 
+/*
+  Is responsible for both, the beep and the green dot which lights up every heartbeat
+*/
 static void do_beat(){
-  s_draw_beat(1);
+  s_draw_beat(G_LABEL_SIZE);
   beep(BEAT_LENGTH);
   turn_beat_off_at = millis() + BEAT_LENGTH;
 }
 
 
 
-static int old_bpm = 0;
 
+/*
+  Draws a generic label
+*/
 static void draw_label(char* label, int y){
   tft.setCursor(G_BPM_WIDTH+G_LABEL_PADDING_X, y);
-  tft.setTextColor(C_GREY);
+  tft.setTextColor(C_LABEL);
   tft.setTextSize(2);
   tft.print(label);
 }
 
+static char* int_to_charp(int i){
+  char buf[20];
+  sprintf(buf, "%d", i);
+  return buf;
+}
+
+static void draw_label_value(char* new_value, char *old_value, int y){
+  // delete the old label value
+  delete_text(old_value, G_LABEL_SIZE, G_LABEL_VALUE_MARGIN, y, C_STATUS_BAR);
+
+  // write the new value
+  tft.setCursor(G_LABEL_VALUE_MARGIN, y);
+  tft.setTextSize(G_LABEL_SIZE);
+  tft.setTextColor(C_TEXT_COLOR);
+  tft.print(new_value);
+
+}
 
 
+static int old_bpm = 0;
 
+/*
+  Draws the BPM display
+*/
 static void s_draw_bpm(int bpm){
 
-  if(bpm < 40 || old_bpm == bpm){
+  if(bpm < MIN_BPM || old_bpm == bpm){
     return;
   }
 
@@ -1102,19 +1218,29 @@ static void beat_draw_loop(){
 
 static void setup_status_bar(){
 
+  // fill the grey rect which is used for the background and the BPM
   tft.fillRect(0,GRAPH_HEIGHT, G_BPM_WIDTH, SCREEN_HEIGHT - GRAPH_HEIGHT, C_GREY);
 
   tft.setCursor(16, SCREEN_HEIGHT - 16);
   tft.setTextColor(C_WHITE);
   tft.setTextSize(2);
   tft.print("BPM");
-
-
   s_draw_bpm(0);
   s_draw_beat(0);
 
 
+  // draw the labels for the ECG status, RR interval, etc.
+  draw_label("ECG", G_ECG_Y);
+  draw_label_value("test", "test", G_ECG_Y);
+
+  draw_label("RR", G_RR_Y);
+
+
+
+
 }
+
+static long old_rr = 0;
 
 /**
  * Draw the status bar of the heart rate monitor.
@@ -1123,23 +1249,19 @@ static void draw_status_bar (void)
 {
     // Update the status bar if the status of the heart rate monitor has changed.
     if (old_status != status) {
+        
+        // Draw status text
+        draw_label_value(getVerboseStatus(status),getVerboseStatus(old_status),  G_ECG_Y);
+
         old_status = status;
+    }
 
-        // Draw status text.
-        tft.setCursor(80,GRAPH_HEIGHT + 10);
-        tft.setTextColor(0xFFFF);
-        tft.setTextSize(2);
-        tft.print("ECG:");
-
-        tft.fillRect(40+88, GRAPH_HEIGHT+10, 40+88+60, 25, BACKGROUND_COLOR);
-
-        if (status == STOPPED) {
-            tft.print("stopped");
-        } else if (status == STABILIZING) {
-            tft.print("stabilizing");  
-        } else if (status == RUNNING) {
-            tft.print("running");  
-        }
+    if(old_rr != current_rr){
+      if(current_bpm > MIN_BPM){
+        draw_label_value(int_to_charp((int) current_rr),int_to_charp((int) old_rr),  G_RR_Y);  
+      }
+      
+      old_rr = current_rr; 
     }
 }
 
@@ -1159,28 +1281,39 @@ static void graphics_setup (void)
     setup_status_bar();
 }
 
-static void graphics_update (void)
+static void sd_menu_loop(){
+  
+}
+
+static void recall_loop(){
+  
+}
+
+static void graphics_loop (void)
 {
 
     /* Only if the heart rate measurment is running 
      * and the signal is stable display the values. */
-    
-     /*
-    if (status == RUNNING) {
-        if (last_millis + DRAW_DELAY < millis()) {       
-            draw_reading();
-            last_millis = millis();
-        }
-    }
-    */
 
     if(status == RUNNING && (measure_index - last_drawn_pos > 0) ){
       draw_reading();
-      //last_millis = millis();
     }
 
-    // Update the status bar.
-    draw_status_bar();
+    if(status != SD_MENU && status != RECALL){
+      // Update the status bar.
+      draw_status_bar();  
+    }else{
+
+      if(status == SD_MENU){
+        sd_menu_loop();
+      }else{
+        recall_loop();
+      }
+
+    }
+
+    
+
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1529,7 +1662,8 @@ void loop (void)
         was_stable = is_stable;
     }
 
+
     // Update the TFT graphics for the heart rate monitor.
-    graphics_update();
+    graphics_loop();
     sound_loop();
 }
