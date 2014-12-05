@@ -103,6 +103,8 @@ static bool rr_interval_initialized = false;
 #define C_BLACK 0x0000
 #define C_WHITE 0xffff
 
+
+
 // semantic colors
 #define C_LABEL C_LIGHT_GREY
 #define C_STATUS_BAR C_BLACK
@@ -110,6 +112,10 @@ static bool rr_interval_initialized = false;
 #define GRAPH_COLOR ILI9341_YELLOW // TODO SET THIS
 #define LINE_COLOR ILI9341_RED
 #define BACKGROUND_COLOR ILI9341_BLACK
+#define C_BUTTON_COLOR ILI9341_YELLOW
+#define C_BUTTON_COLOR_ACTIVE 0x422B
+#define C_BUTTON_LABEL_COLOR 0xffff
+
 
 // labels
 #define G_LABEL_SIZE 2
@@ -119,6 +125,32 @@ static bool rr_interval_initialized = false;
 #define G_ECG_Y GRAPH_HEIGHT + 10
 #define G_RR_Y G_ECG_Y + G_LABEL_PADDING_Y
 
+
+// buttons
+#define BUTTON_LABEL_SIZE 2
+#define BUTTON_PADDING 5
+
+
+typedef struct{
+  char* label;    // label of the button
+  int x;          // x pos of the button
+  int y;          // y pos of the button
+  int visible;    // 1 if the button is currently visible
+  int has_focus;  // 1 if the button has the focus and should be highlighted
+  int index;      // the index of the button
+  int was_pressed;
+} graphical_button;
+
+#define GRAPHICAL_BUTTON_NUM 2
+
+
+#define GBT_REC 0
+#define GBT_LOAD 1
+
+
+
+static graphical_button g_buttons[GRAPHICAL_BUTTON_NUM];
+static int current_active_gbutton = 0;
 
 
 
@@ -134,6 +166,11 @@ static void resetStabilization(void);
 static void setup_sd_menu(void);
 static void setup_recall(void);
 
+// graphical buttons
+//void init_graphical_button(*graphical_button button);
+void init_graphical_buttons();
+void draw_button(int index);
+void hide_button(int index);
 
 
 ///////////////////////////////////////////////////////////////////////////
@@ -146,7 +183,7 @@ char* getVerboseStatus(Status s){
         return "stopped";
         break;
       case STABILIZING:
-        return "stabilizing";
+        return "unstable";
         break;
       case RUNNING:
         return "running";
@@ -624,17 +661,20 @@ static void pdbInit (void)
 //                           BUTTON (with DEBOUNCING)                    //
 ///////////////////////////////////////////////////////////////////////////
 
+#define NUM_BUTTONS  2
+
 // The button is wired to pin 1 of the Teensy.
-static const int BUTTON = A1;
+static int BUTTONS[NUM_BUTTONS] = {2,3};
+//static const int BUTTON = A1;
 
 // State variables used for the debouncing of the button state.
-static long lastDebounceTime = 0;
+static long lastDebounceTime[NUM_BUTTONS] = {0,0};
 static const long DEBOUNCE_DELAY = 30;
-static int lastButtonState = HIGH;
+static int lastButtonState[NUM_BUTTONS] = {HIGH, HIGH};
 
 /* The current state of the button.
  * On startup it is assumed not to be pressed. */
-static int buttonState = 0;
+static  int buttonState[NUM_BUTTONS] = {0,0};
 
 /**
  * Checks whether the button was pressed.
@@ -645,28 +685,29 @@ static int buttonState = 0;
  *
  * @return true if the button was pressed, otherwise false
  */
-static bool wasButtonPressed (void)
+static bool wasButtonPressed (int button_index)
 {
     // Current reading of the button state.
-    int reading = digitalRead(BUTTON);
+    int reading = digitalRead(BUTTONS[button_index]);
+    
 
-    if (reading != lastButtonState) {
+    if (reading != lastButtonState[button_index]) {
         // Reset the debouncing timer.
-        lastDebounceTime = millis();
+        lastDebounceTime[button_index] = millis();
     }
 
-    if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+    if ((millis() - lastDebounceTime[button_index]) > DEBOUNCE_DELAY) {
         /* Whatever the reading is at, it's been there for longer
          * than the debounce delay, so take it as the actual current state: */
 
         // If the button state has changed:
-        if (reading != buttonState) {
-            buttonState = reading;
+        if (reading != buttonState[button_index]) {
+            buttonState[button_index] = reading;
 
             /* The button was pressed in case the button state had become LOW.
              * Note: The button is connected to an internal pull-up resistor,
              *       thus, the logic is inverted. */
-            if (buttonState == LOW) {
+            if (buttonState[button_index] == LOW) {
                 return true;
             }
         }
@@ -674,7 +715,7 @@ static bool wasButtonPressed (void)
 
     /* Save the reading.
      * Next time through the loop, it'll be the lastButtonState: */
-    lastButtonState = reading;
+    lastButtonState[button_index] = reading;
 
     // The button was not pressed.
     return false;
@@ -1235,7 +1276,12 @@ static void setup_status_bar(){
 
   draw_label("RR", G_RR_Y);
 
-
+  g_buttons[GBT_LOAD].visible = true;
+  g_buttons[GBT_REC].visible = true;
+  g_buttons[GBT_REC].has_focus = true;
+  current_active_gbutton = GBT_REC;
+  draw_button(GBT_LOAD);
+  draw_button(GBT_REC);
 
 
 }
@@ -1281,8 +1327,16 @@ static void graphics_setup (void)
     setup_status_bar();
 }
 
+static void setup_sd_menu(){
+
+}
+
 static void sd_menu_loop(){
   
+}
+
+static void setup_recall(){
+
 }
 
 static void recall_loop(){
@@ -1294,11 +1348,13 @@ static void graphics_loop (void)
 
     /* Only if the heart rate measurment is running 
      * and the signal is stable display the values. */
-
     if(status == RUNNING && (measure_index - last_drawn_pos > 0) ){
       draw_reading();
     }
 
+    /*
+    decide if we have to draw the status bar or the windows for recording loading and recall
+    */
     if(status != SD_MENU && status != RECALL){
       // Update the status bar.
       draw_status_bar();  
@@ -1315,6 +1371,126 @@ static void graphics_loop (void)
     
 
 }
+
+///////////////////////////////////////////////////////////////////////////
+//                          WINDOW FRAMEWORK                             //
+///////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+void init_graphical_buttons(){
+
+  // iterate over all buttons
+  for(int i = 0; i < GRAPHICAL_BUTTON_NUM; i++){
+    g_buttons[i].has_focus = 0;
+    g_buttons[i].index = i;
+    g_buttons[i].visible = 0;
+    g_buttons[i].was_pressed = 0;
+  }
+
+
+
+  // RECORDING BUTTON
+  g_buttons[GBT_REC].label = "rec";
+  g_buttons[GBT_REC].x = SCREEN_WIDTH - 70;
+  g_buttons[GBT_REC].y = SCREEN_HEIGHT - 30;
+  
+  // LOADING BUTTON
+  g_buttons[GBT_LOAD].label = "load";
+  g_buttons[GBT_LOAD].x = SCREEN_WIDTH - 70;
+  g_buttons[GBT_LOAD].y = SCREEN_HEIGHT - 65;
+  
+
+
+};
+
+
+
+
+
+void draw_button(int index){
+  int bb_width, bb_height;
+  graphical_button bt = g_buttons[index];
+
+  get_boundingbox(bt.label, BUTTON_LABEL_SIZE, &bb_width, &bb_height);
+
+  // add the padding
+  bb_width+= BUTTON_PADDING*2;
+  bb_height+= BUTTON_PADDING*2;
+
+  // draw the background
+  uint16_t color = (bt.has_focus) ? C_BUTTON_COLOR_ACTIVE : C_BUTTON_COLOR;
+
+  //cout << bt.x << " " << bt.y << " " << bb_width << " " <<  bb_height << " " << bt.label << endl;
+
+  tft.setCursor(bt.x + BUTTON_PADDING, bt.y + BUTTON_PADDING);
+  tft.setTextSize(BUTTON_LABEL_SIZE);
+  
+
+  tft.fillRect(bt.x, bt.y, bb_width, bb_height, BACKGROUND_COLOR);
+  if(bt.has_focus){
+    tft.fillRect(bt.x, bt.y, bb_width, bb_height, C_BUTTON_COLOR);  
+    tft.setTextColor(C_BLACK);
+  }else{
+    tft.drawRect(bt.x, bt.y, bb_width, bb_height, C_BUTTON_COLOR);  
+    tft.setTextColor(C_WHITE);
+  }
+  
+
+  tft.print(bt.label);
+
+
+};
+
+
+bool wasVButtonPressed(int index){
+  if(g_buttons[index].was_pressed){
+    g_buttons[index].was_pressed = false;
+    return true;
+  }
+
+  return false;
+}
+
+void button_loop(){
+
+  if(wasButtonPressed(0)){
+
+    // disable current button
+
+    g_buttons[current_active_gbutton].has_focus = false;
+    g_buttons[current_active_gbutton].was_pressed = false;
+    if(g_buttons[current_active_gbutton].visible){
+      draw_button(current_active_gbutton);
+    }
+
+    current_active_gbutton++;
+    if(current_active_gbutton >= GRAPHICAL_BUTTON_NUM){
+      current_active_gbutton = 0;
+    }
+
+    g_buttons[current_active_gbutton].has_focus = true;
+    g_buttons[current_active_gbutton].was_pressed = false;
+    if(g_buttons[current_active_gbutton].visible){
+      draw_button(current_active_gbutton);
+    }
+
+
+
+  }
+
+  if(wasButtonPressed(1)){
+    g_buttons[current_active_gbutton].was_pressed = true;
+  }
+
+
+}
+
+
+
+//void hide_button(int index);
 
 ///////////////////////////////////////////////////////////////////////////
 //                                   SETUP                               //
@@ -1338,7 +1514,10 @@ void setup (void)
     #endif
     /* Setup button to start and abort a heart rate measurement.
      * Enable the internal pull-up resistor of the pin connected with the button. */
-    pinMode(BUTTON, INPUT_PULLUP);
+    for(int i = 0; i < NUM_BUTTONS; i++){
+      pinMode(BUTTONS[i], INPUT_PULLUP);  
+    }
+    
     pinMode(PIEZO_TRANSDUCER, OUTPUT);
     #ifdef DEBUG
         cout << pstr("done") << endl;
@@ -1351,8 +1530,9 @@ void setup (void)
     tft.begin();    
     tft.setRotation(3);
 
-    
+    init_graphical_buttons();
     graphics_setup();   
+    
     #ifdef DEBUG
         cout << pstr("done") << endl;
     #endif
@@ -1488,9 +1668,11 @@ void resetVariables(void)
     ma_buf.initialized = false;
 
     // State variables used for the debouncing of the button state.
-    lastDebounceTime = 0;
-    lastButtonState = HIGH;
-    buttonState = 0;
+    for(int i = 0; i < NUM_BUTTONS; i++){
+      lastDebounceTime[i] = 0;
+      lastButtonState[i] = HIGH;
+      buttonState[i] = 0;
+    }
 
     // Stabilization window buffer.
     stab_buf_i = 0;
@@ -1524,7 +1706,7 @@ void loop (void)
     #endif
 
     // Was the button pressed to either start or abort a measurement?
-    if(wasButtonPressed()) {
+    if(wasVButtonPressed(GBT_REC)) {
 
         // Start a new measurement in case it is not running currently.
         if (status == STOPPED) {
@@ -1541,6 +1723,12 @@ void loop (void)
             // Finalize the heart rate measurement.
             finalize();
         }
+
+        cout << "rec" << endl;
+    }
+
+    if(wasVButtonPressed(GBT_LOAD)){
+      cout << "load" << endl;
     }
 
     static int sample_transformed = 0;
@@ -1666,4 +1854,5 @@ void loop (void)
     // Update the TFT graphics for the heart rate monitor.
     graphics_loop();
     sound_loop();
+    button_loop();
 }
