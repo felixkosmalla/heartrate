@@ -172,6 +172,7 @@ static void pdbInit(void);
 static void resetStabilization(void);
 static void setup_sd_menu(void);
 static void setup_recall(void);
+static void resetVariables(void);
 
 // graphical buttons
 //void init_graphical_button(*graphical_button button);
@@ -263,6 +264,7 @@ static void setStatus(Status s)
   noInterrupts();
   old_status = status;
   status = s;
+  interrupts();
 
   // call the setup routine for every state
   switch (s) {
@@ -278,9 +280,9 @@ static void setStatus(Status s)
     default:
         break;
       
-}
+  }
 
-  interrupts();
+  
 }
 
 
@@ -885,6 +887,8 @@ static bool isSignalStable (void)
         min_stab_val = min(min_stab_val, stabilizing_buffer[i]);
     }
 
+
+
     // In case of too much noise, the signal is instable.
     bool stable = (max_stab_val < 4000 && min_stab_val > 100);
 
@@ -1344,6 +1348,7 @@ static void graphics_setup (void)
 void hide_all_buttons(){
   for(int i = 0; i < GRAPHICAL_BUTTON_NUM; i++){
     g_buttons[i].visible = false;
+    g_buttons[i].has_focus = false;
   }
 }
 
@@ -1351,6 +1356,8 @@ void hide_all_buttons(){
 #define MAX_NUM_OF_FILES 30
 static int filec;
 static char filenames[MAX_NUM_OF_FILES][11];
+static char selected_filename[11];
+
 
 
 static int get_file_list(){
@@ -1403,7 +1410,15 @@ static int get_file_list(){
 }
 
 
+#define FILES_PER_SCREEN 10
+#define FILE_ITEM_HEIGHT (SCREEN_HEIGHT/FILES_PER_SCREEN)
+#define FILE_DISPLAY_CENTER ((SCREEN_HEIGHT / 2)+FILE_ITEM_HEIGHT)
+#define FILE_NUM_PADDING 4
+#define FILE_PADDING_LEFT 20
+#define FILE_WIDTH 200
 
+
+static int previous_file_index = -1;
 
 
 static void setup_sd_menu(){
@@ -1430,15 +1445,16 @@ static void setup_sd_menu(){
   }
 
 
-
-
+  previous_file_index = -1;
 
 }
 
+
 static void sd_menu_loop(){
+
   if(wasVButtonPressed(GBT_ABORT_SELECT)){
     // Reset the heart rate display.
-    init_graphical_buttons();
+    
     graphics_setup();
     setStatus(STOPPED);
     return;
@@ -1449,15 +1465,49 @@ static void sd_menu_loop(){
     return;
   }
 
+  current_pot_reading = 100;
+
+  // map pot reading to index of file
+  int file_index = map(current_pot_reading, 0, 1023, 0, filec-1);
+
+  if(file_index != previous_file_index){
+    previous_file_index = file_index;
 
 
-  //current_pot_reading = analogRead(POTENTIOMETER);
+    // draw the file list
+    // where should we start drawing
+    int file_name_rel_index = -file_index;
+
+    
+    tft.setTextSize(2);
+
+    for(int i = 0; i < FILES_PER_SCREEN; i++){
+      int file_to_print_index = i+file_index - FILE_NUM_PADDING;
+      if(file_to_print_index >= 0){
+
+        tft.setCursor(FILE_PADDING_LEFT+10, i*FILE_ITEM_HEIGHT +2);
+        
+          if(i==FILE_NUM_PADDING){
+            tft.setTextColor(C_BLACK);    
+            tft.fillRect(FILE_PADDING_LEFT, i*FILE_ITEM_HEIGHT, FILE_WIDTH, FILE_ITEM_HEIGHT, ILI9341_YELLOW);
+          }else{
+            tft.setTextColor(C_WHITE);    
+            tft.drawRect(FILE_PADDING_LEFT, i*FILE_ITEM_HEIGHT, FILE_WIDTH, FILE_ITEM_HEIGHT, ILI9341_YELLOW);
+          }
+        
+  
+
+        cout << i+file_index << endl;
+        tft.print(filenames[i+file_index - FILE_NUM_PADDING]);  
+      }
+
+      
+    }
 
 
 
+  }
 
-
-  cout << current_pot_reading << endl;
 
 
 }
@@ -1495,16 +1545,11 @@ static void graphics_loop (void)
 
     }
 
-    
-
 }
 
 ///////////////////////////////////////////////////////////////////////////
 //                          WINDOW FRAMEWORK                             //
 ///////////////////////////////////////////////////////////////////////////
-
-
-
 
 
 void init_graphical_buttons(){
@@ -1814,6 +1859,9 @@ static void resetRecording(void)
 // Resets all variables.
 void resetVariables(void)
 {
+
+    resetRecording();
+
     // Status of the heart rate monior.
     status = STOPPED;
     old_status = RUNNING;
@@ -1946,7 +1994,7 @@ void loop (void)
         }
     }
 
-    if (status != STOPPED) {
+    if (status == STABILIZING || status == RUNNING) {
 
         bool is_stable = isSignalStable();
 
@@ -1955,6 +2003,8 @@ void loop (void)
 
             // Is the heart signal stable now?
             if (is_stable && !was_stable && !wait_for_stable) {
+
+
 
                 // Wait a moment and check again if the signal is stable.
                 wait_for_stable = true;
@@ -1983,6 +2033,7 @@ void loop (void)
                 //while(true);
                 resetRecording();
                 // Claim that we are waiting until the signal of heart rate is stable again.
+                setup_status_bar();
                 setStatus(STABILIZING);
             } 
 
