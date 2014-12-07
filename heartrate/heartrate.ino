@@ -576,7 +576,7 @@ void adc0_isr (void)
 
   } else if ((ADC0_SC1B & ADC_SC1_COCO) == ADC_SC1_COCO) {
     current_pot_reading = ADC0_RB;
-    cout << pstr("poti: ") << current_pot_reading << endl;
+    
   }
 }
 
@@ -1052,7 +1052,7 @@ static void draw_grid (void)
 }
 
 static int get_reading_at_index(int index){
-  // TODO: chanage this when measurement buffer structure changes!
+  // TODO MAX: chanage this when measurement buffer structure changes!
 
   return measurement_buffer[index];
 }
@@ -1527,9 +1527,11 @@ static void setup_sd_menu(){
 
   get_file_list();
 
+  #ifdef DEBUG
   for(int i = 0; i < filec; i++){
     cout << filenames[i] << endl;
   }
+  #endif
 
 
   previous_file_index = -1;
@@ -1588,8 +1590,10 @@ static void sd_menu_loop(){
           }
         
   
-
+        #ifdef DEBUG
         cout << i+file_index << endl;
+        #endif
+
         tft.print(filenames[i+file_index - FILE_NUM_PADDING]);  
       }
 
@@ -1608,6 +1612,8 @@ static void sd_menu_loop(){
 
 
 static void load_buffer_from_file(){
+
+  // TODO MAX
 
   for(int i = 0; i < MEASUREMENT_SIZE; i++){
     float sin_value = sin((float) i / 100.0f);
@@ -1716,6 +1722,7 @@ static void draw_recall_graph(){
           screen_pos++;
           if(screen_pos >= VALUE_COUNT){
             screen_pos = 0;
+            break;
           }
 
 
@@ -1738,7 +1745,9 @@ static void draw_recall_graph(){
 static void recall_loop(){
   if(wasVButtonPressed(GBT_RECALL_BACK)){
     // Reset the heart rate display.
+    #ifdef DEBUG
     cout << "recall back" << endl;
+    #endif
     setStatus(STOPPED);
     graphics_setup();
     
