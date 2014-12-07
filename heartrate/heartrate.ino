@@ -181,7 +181,7 @@ static int file_index = 0;
 
 static void do_beat();
 static void adcInit(void);
-static void adcCalibrate(void);
+static void adc0Calibrate(void);
 static void pdbInit(void);
 static void resetStabilization(void);
 static void setup_sd_menu(void);
@@ -567,11 +567,17 @@ float getAverage (struct MovingAverageBuffer &m) {
 static volatile bool adcInterrupt = false;
 void adc0_isr (void)
 {
-	// Acquire the latest raw sample from the ADC.
-	heart_rate_signal_raw = ADC0_RA; // 2 bytes  
- 
+  if ((ADC0_SC1A & ADC_SC1_COCO) == ADC_SC1_COCO) {
+  	// Acquire the latest raw sample from the ADC.
+  	heart_rate_signal_raw = ADC0_RA; // 2 bytes  
+   
     // Notify the main loop that a new ADC sample is ready to be processed.
     adcInterrupt = true;
+
+  } else if ((ADC0_SC1B & ADC_SC1_COCO) == ADC_SC1_COCO) {
+    current_pot_reading = ADC0_RB;
+    cout << pstr("poti: ") << current_pot_reading << endl;
+  }
 }
 
 // We want the single-ended 12-bit resolution mode, that is, ADC_CFG1_ADICLK(1).
@@ -581,11 +587,18 @@ void adc0_isr (void)
 // Enable the long sample time mode for higher precision, that is, ADC_CFG1_ADLSMP.
 #define ADC_CONFIG1 (ADC_CFG1_ADIV(2) | ADC_CFG1_ADICLK(0) | ADC_CFG1_MODE(1) | ADC_CFG1_ADLSMP)
 
-// Select the ADxxb channels, that is, ADC_CFG2_MUXSEL.
+// Select the ADxxA channels, that is, ADC_CFG2_MUXSEL.
 // Due to the long sample time mode and with 12-bit resolution we will add 6 extra
-// ADCK cycles (10 ADCK cycyles total sample time) according to the datasheet,
+// ADCK cycles (10 ADCK bcycyles total sample time) according to the datasheet,
 // that is, ADC_CFG2_ADLSTS(2). We may return to default if values are too bad.
 #define ADC_CONFIG2 (ADC_CFG2_MUXSEL | ADC_CFG2_ADLSTS(3))
+//#define ADC_CONFIG2 (ADC_CFG2_ADLSTS(3))
+
+// FIXME: remove later on again
+static const uint8_t channel2sc1a[] = {
+  5, 14, 8, 9, 13, 12, 6, 7, 15, 4,
+  0, 19, 3, 21, 26, 22
+};
 
 static void adcInit (void)
 {
@@ -602,16 +615,18 @@ static void adcInit (void)
 	// We will average by 32 samples, that is, ADC_SC3_AVGS(3).
 	ADC0_SC3 = ADC_SC3_AVGE | ADC_SC3_AVGS(3);
 
-	// Calibrate the ADC.
-	adcCalibrate();
+	// Calibrate the ADC0A.
+	adc0Calibrate();
 
 	// Differential mode off, we want only single-ended 12-bit values
-	// Select input channel A0 (0x5) and enable the ADC interrupt.
-	ADC0_SC1A = ADC_SC1_AIEN | 0x5;
+	// Select input channel A0 (0x5) and enable the ADC0 interrupt.
+	ADC0_SC1A = ADC_SC1_AIEN | channel2sc1a[0]; // 0x5, HEART REATE
+  ADC0_SC1B = ADC_SC1_AIEN | channel2sc1a[8]; // POTENTIOMETER FIXME: channel A1?
+
 	NVIC_ENABLE_IRQ(IRQ_ADC0);
 }
 
-static void adcCalibrate (void) 
+static void adc0Calibrate (void) 
 {
 	uint16_t sum;
 
@@ -658,8 +673,15 @@ static void adcCalibrate (void)
 #define PDB_CONFIG (PDB_SC_TRGSEL(15) | PDB_SC_PDBEN \
 	| PDB_SC_CONT | PDB_SC_PRESCALER(0) | PDB_SC_MULT(3))
 
-#define PDB_CH0C1_TOS 0x0100
-#define PDB_CH0C1_EN 0x01
+//#define PDB_CH0C1_TOS 0x0100
+//#define PDB_CH0C1_EN 0x01
+
+#define PDB_C1_EN_MASK    0xFFu
+#define PDB_C1_EN_SHIFT   0
+#define PDB_C1_EN(x)      (((uint32_t)(((uint32_t)(x))<<PDB_C1_EN_SHIFT))&PDB_C1_EN_MASK)
+#define PDB_C1_TOS_MASK   0xFF00u
+#define PDB_C1_TOS_SHIFT  8
+#define PDB_C1_TOS(x)     (((uint32_t)(((uint32_t)(x))<<PDB_C1_TOS_SHIFT))&PDB_C1_TOS_MASK)
 
 static void pdbInit (void) 
 {
@@ -672,8 +694,16 @@ static void pdbInit (void)
 	// We want 0 interrupt delay.
 	PDB0_IDLY = 0;
 
-	// Enable pre-trigger.
-	PDB0_CH0C1 = PDB_CH0C1_TOS | PDB_CH0C1_EN;
+	// Enable pre-trigger 0 and 1.
+	//PDB0_CH0C1 = PDB_CH0C1_TOS | PDB_CH0C1_EN;
+  PDB0_CH0C1 = PDB_C1_EN(0x01) | PDB_C1_TOS(0x01) |
+               PDB_C1_EN(0x02) | PDB_C1_TOS(0x02);
+
+  // Delay the pre-tigger.
+  PDB0_CH0DLY0 = 3648;    // delay the conversion time = 76us
+
+  // Delay the pre-tigger.
+  PDB0_CH0DLY1 = 1824;    // delay the conversion time = 38us
 
 	// Setup configuration.
 	PDB0_SC = PDB_CONFIG | PDB_SC_LDOK;
