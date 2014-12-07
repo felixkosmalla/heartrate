@@ -43,7 +43,7 @@ static const size_t SAMPLING_RATE = 250;        // 250Hz
 static const size_t MEASURE_DURATION = 30;      // 30sec
 
 // Buffer holds 30sec * 250Hz samples obtained during a measurement.
-static const size_t MEASUREMENT_SIZE = SAMPLING_RATE*MEASURE_DURATION;
+static const size_t MEASUREMENT_SIZE = SAMPLING_RATE*MEASURE_DURATION; // 7,500
 // indicated the current position of the recording
 static volatile size_t measure_index = 0;
 static volatile uint16_t measurement_buffer[MEASUREMENT_SIZE];
@@ -75,21 +75,24 @@ static bool rr_interval_initialized = false;
 // Dimensions of the display.
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
-#define GRAPH_HEIGHT 160
+#define GRAPH_HEIGHT 140
 
-#define TIME_SPAN (800*2) // number of milliseconds which should be displayed, should be a multiple of 320 (or SCREEN_WIDTH) and 200
+#define TIME_SPAN (1600) // number of milliseconds which should be displayed, should be a multiple of 320 (or SCREEN_WIDTH) and 200
 #define NUMBER_OF_LARGE_SQUARES (TIME_SPAN / 200) // 8, 16; 200ms, see one square in the standard calibration on the website
 #define LARGE_SQUARE_WIDTH (SCREEN_WIDTH / NUMBER_OF_LARGE_SQUARES) // in pixels 40,20 -> 40 pixels are 200ms of data -> 50 values
 #define SMALL_SQUARE_LENGTH (LARGE_SQUARE_WIDTH / 5)
 #define SAMPLES_PER_SQUARE_AVAILABLE (200 / (1000 / SAMPLING_RATE)) // 50, that means we have to condense 50 samples to 40 pixels while retaining a line 
 #define SAMPLES_PER_SQUARE 10 // how much samples should be displayed in a square. should divide SQUARE_WIDTH without remainder
 #define SAMPLES_TO_SKIP ((SAMPLES_PER_SQUARE_AVAILABLE / SAMPLES_PER_SQUARE)+0) // number of samples to skip or average
+#define SAMPLES_PER_SCREEN_AVAILABLE (NUMBER_OF_LARGE_SQUARES * SAMPLES_PER_SQUARE_AVAILABLE) // 50 * 8 = 400
+#define SCREENS_PER_RECORDING ((MEASUREMENT_SIZE / SAMPLES_PER_SCREEN_AVAILABLE) + 1) // (7500 /  400) = 18.75      +1 to round up
 
 #define SCREEN_POS_TO_PIXEL (LARGE_SQUARE_WIDTH / SAMPLES_PER_SQUARE) // usage: screen_pos * SCREEN_POS_TO_PIXEL
 
 // number of values which are actually displayed one at a time
 #define VALUE_COUNT  (SAMPLES_PER_SQUARE * NUMBER_OF_LARGE_SQUARES) // 10 * 8; 
 
+int current_sample_drawn_index = 0;
 
 
 
@@ -119,11 +122,12 @@ static bool rr_interval_initialized = false;
 
 // labels
 #define G_LABEL_SIZE 2
-#define G_LABEL_PADDING_Y 25
-#define G_LABEL_PADDING_X 10
-#define G_LABEL_VALUE_MARGIN G_BPM_WIDTH +  60
+#define G_LABEL_PADDING_Y 24
+#define G_LABEL_PADDING_X 8
+#define G_LABEL_VALUE_MARGIN G_BPM_WIDTH +  64
 #define G_ECG_Y GRAPH_HEIGHT + 10
 #define G_RR_Y G_ECG_Y + G_LABEL_PADDING_Y
+#define G_TIME_LEFT_Y G_RR_Y + G_LABEL_PADDING_Y
 
 
 // buttons
@@ -131,6 +135,7 @@ static bool rr_interval_initialized = false;
 #define BUTTON_PADDING 5
 
 #define POTENTIOMETER 22
+#define MAX_POT_READING 4095
 
 static int current_pot_reading = 0;
 
@@ -145,19 +150,28 @@ typedef struct{
   int was_pressed;
 } graphical_button;
 
-#define GRAPHICAL_BUTTON_NUM 4
+#define GRAPHICAL_BUTTON_NUM 5
 
 
 #define GBT_REC 0
 #define GBT_LOAD 1
 #define GBT_SELECT_REC 2
 #define GBT_ABORT_SELECT 3
+#define GBT_RECALL_BACK 4
 
 
 
 
 static graphical_button g_buttons[GRAPHICAL_BUTTON_NUM];
 static int current_active_gbutton = 0;
+
+
+// File Loading
+#define MAX_NUM_OF_FILES 30
+static int filec;
+static char filenames[MAX_NUM_OF_FILES][11];
+static int file_index = 0;
+
 
 
 
@@ -196,7 +210,7 @@ char* getVerboseStatus(Status s){
         return "unstable";
         break;
       case RUNNING:
-        return "running";
+        return "recording";
         break;
       case SD_MENU:
         return "menu";
@@ -1007,21 +1021,16 @@ static void draw_grid (void)
     tft.drawLine(0,GRAPH_HEIGHT,SCREEN_WIDTH,GRAPH_HEIGHT, LINE_COLOR);
 }
 
+static int get_reading_at_index(int index){
+  // TODO: chanage this when measurement buffer structure changes!
+
+  return measurement_buffer[index];
+}
 
 static int convert_reading(int reading){
   return map(reading, 0, 4096, GRAPH_HEIGHT,0);
 }
 
-// /**
-//  * Computes the y-axis position of the next sample to be displayed.
-//  * 
-//  * @return int Y-axis position for the next sample.
-//  */
-// static int get_reading_y (void) {
-
-//     int reading = map(gfx_sample, 0, 4096, 160,0);
-//     return constrain(reading,0,160-1);
-// }
 
 /**
  * Draw the samples of the heart rate signal on the TFT display.
@@ -1030,7 +1039,6 @@ static int convert_reading(int reading){
     static long lastTimeDrawn = 0;
 #endif
 
-int current_sample_drawn_index = 0;
 
 
 
@@ -1060,7 +1068,7 @@ static void draw_reading (void)
         if(current_sample_drawn_index == 0){
 
           int sample_index = i + last_drawn_pos;
-          int sample = measurement_buffer[sample_index];
+          int sample = get_reading_at_index(sample_index);
 
           // previous y
           int previous_screen_pos = screen_pos-1;
@@ -1217,6 +1225,12 @@ static void draw_label(char* label, int y){
   tft.print(label);
 }
 
+static char* float_to_charp(float f){
+  char buf[20];
+  sprintf(buf, "%.1f", f);
+  return buf;
+}
+
 static char* int_to_charp(int i){
   char buf[20];
   sprintf(buf, "%d", i);
@@ -1285,25 +1299,61 @@ static void setup_status_bar(){
 
 
   // draw the labels for the ECG status, RR interval, etc.
-  draw_label("ECG", G_ECG_Y);
-  draw_label_value("test", "test", G_ECG_Y);
-
+  draw_label("ECG", G_ECG_Y);  
   draw_label("RR", G_RR_Y);
+  draw_label("Time", G_TIME_LEFT_Y);
+
 
   // draw the buttons
   hide_all_buttons();
 
-  g_buttons[GBT_LOAD].visible = true;
-  g_buttons[GBT_REC].visible = true;
-  g_buttons[GBT_REC].has_focus = true;
-  current_active_gbutton = GBT_REC;
-  draw_button(GBT_LOAD);
-  draw_button(GBT_REC);
+  // decide if we want to draw the buttons for recall or recording
+  switch (status) {
+      case RUNNING:
+      case STOPPED:
+      case STABILIZING:
+        g_buttons[GBT_LOAD].visible = true;
+        g_buttons[GBT_REC].visible = true;
+        g_buttons[GBT_REC].has_focus = true;
+        current_active_gbutton = GBT_REC;
+        draw_button(GBT_LOAD);
+        draw_button(GBT_REC);
+        break;
+      case RECALL:
+        // do something
+        g_buttons[GBT_RECALL_BACK].visible = true;
+        g_buttons[GBT_RECALL_BACK].has_focus = true;
+        current_active_gbutton = GBT_RECALL_BACK;
+        draw_button(GBT_RECALL_BACK);
+
+
+        // if we are in recall mode, draw the name of the file we are currently displaying
+
+
+        
+        draw_label_value(filenames[file_index],filenames[file_index], G_ECG_Y);  
+        break;
+      default:
+        break;
+        // do something
+  };
+
+
+  
 
 
 }
 
 static long old_rr = 0;
+
+static float old_time = 0;
+
+/* converts the timestamp at position 'pos' to a human readable time format */
+static float get_time_reading(int pos){
+  float secs = ((float) pos / (float) SAMPLING_RATE);
+  
+  return secs;
+}
 
 /**
  * Draw the status bar of the heart rate monitor.
@@ -1325,6 +1375,15 @@ static void draw_status_bar (void)
       }
       
       old_rr = current_rr; 
+    }
+
+    float t = get_time_reading(measure_index);
+    if(abs(t-old_time) > 0.025){
+
+      draw_label_value(float_to_charp((float) t),float_to_charp((float) old_time), G_TIME_LEFT_Y);
+
+      old_time = t;
+
     }
 }
 
@@ -1353,10 +1412,6 @@ void hide_all_buttons(){
 }
 
 
-#define MAX_NUM_OF_FILES 30
-static int filec;
-static char filenames[MAX_NUM_OF_FILES][11];
-static char selected_filename[11];
 
 
 
@@ -1450,29 +1505,34 @@ static void setup_sd_menu(){
 }
 
 
+
 static void sd_menu_loop(){
 
   if(wasVButtonPressed(GBT_ABORT_SELECT)){
     // Reset the heart rate display.
     
-    graphics_setup();
+    
     setStatus(STOPPED);
+    graphics_setup();
     return;
   }
 
   if(wasVButtonPressed(GBT_SELECT_REC)){
+    
+
     setStatus(RECALL);
     return;
   }
 
-  current_pot_reading = 100;
+  
 
   // map pot reading to index of file
-  int file_index = map(current_pot_reading, 0, 1023, 0, filec-1);
+  file_index = map(current_pot_reading, 0, MAX_POT_READING, 0, filec-1);
 
   if(file_index != previous_file_index){
     previous_file_index = file_index;
 
+    tft.fillRect(FILE_PADDING_LEFT, 0, FILE_WIDTH, SCREEN_HEIGHT, BACKGROUND_COLOR);
 
     // draw the file list
     // where should we start drawing
@@ -1485,7 +1545,7 @@ static void sd_menu_loop(){
       int file_to_print_index = i+file_index - FILE_NUM_PADDING;
       if(file_to_print_index >= 0){
 
-        tft.setCursor(FILE_PADDING_LEFT+10, i*FILE_ITEM_HEIGHT +2);
+        tft.setCursor(FILE_PADDING_LEFT+10, i*FILE_ITEM_HEIGHT +3);
         
           if(i==FILE_NUM_PADDING){
             tft.setTextColor(C_BLACK);    
@@ -1512,12 +1572,158 @@ static void sd_menu_loop(){
 
 }
 
-static void setup_recall(){
-  tft.fillScreen(ILI9341_YELLOW);
+
+
+
+static void load_buffer_from_file(){
+
+  for(int i = 0; i < MEASUREMENT_SIZE; i++){
+    float sin_value = sin((float) i / 100.0f);
+    measurement_buffer[i] = (int) ((sin_value * 1000.0f) + 2000.0f);
+  }
+
 }
 
-static void recall_loop(){
+
+
+static int old_measurement_index = -1;
+
+static void setup_recall(){
+  old_measurement_index = -1;
+  hide_all_buttons();
+  graphics_setup();
+  load_buffer_from_file();
+
+  // TODO, remove
+  current_pot_reading = 0;
+
+}
+
+static void read_status_readings_from_buffer(int pos){
+
+}
+
+static void draw_recall_graph(){
+
+  int pos = measure_index;
   
+  last_drawn_pos = 0;
+  screen_pos = 0;
+
+  
+
+  if(old_measurement_index != pos){
+    #ifdef DEBUG
+      cout << "draw new screen" << endl;
+    #endif
+    old_measurement_index = pos;
+
+    // reset the graphics buffer
+    for (int i = 0; i < VALUE_COUNT; i++) {
+      previous_values[i] = -1;
+    }
+
+    // fill the screen black
+    tft.fillRect(0,0,SCREEN_WIDTH, GRAPH_HEIGHT, BACKGROUND_COLOR);
+  
+
+    // redraw the grid
+    draw_grid();
+
+    // get the several status readings
+    read_status_readings_from_buffer(pos);
+
+    // draw the graph for this portion of the reading
+    // set the screen_pos to 0
+
+    int screen_pos = 0;
+
+    // get the number of samples to draw
+    int num_samples_to_draw = SAMPLES_PER_SCREEN_AVAILABLE;
+
+
+
+    // draw the samples. we have to downsample here or just skip 
+    for(int i = 0; i < num_samples_to_draw; i++){
+
+
+        if(current_sample_drawn_index == 0){
+
+              #ifdef DEBUG
+                cout << "draw sample " << i << endl;
+              #endif
+
+        
+          int sample_index = i + measure_index;
+          // we don't want to draw measurements we don't have
+          if(sample_index >= MEASUREMENT_SIZE ){
+            break;
+          }
+          int sample = get_reading_at_index(sample_index);
+
+          // previous y
+          int previous_screen_pos = screen_pos-1;
+
+
+          // convert the sample value to draw
+          int y_pos = convert_reading(sample);
+
+          #ifdef DEBUG
+            cout << "val " << y_pos << endl;
+          #endif
+          
+       
+          // see if we can draw a line
+          if(previous_screen_pos >= 0 && previous_values[previous_screen_pos] > 0){
+            tft.drawLine(previous_screen_pos * SCREEN_POS_TO_PIXEL, previous_values[previous_screen_pos], screen_pos * SCREEN_POS_TO_PIXEL, y_pos, ILI9341_YELLOW);
+          }
+
+
+          previous_values[screen_pos] = y_pos;
+
+          screen_pos++;
+          if(screen_pos >= VALUE_COUNT){
+            screen_pos = 0;
+          }
+
+
+
+        
+        }
+
+        // this is the actual skipping 
+        current_sample_drawn_index++;
+        if(current_sample_drawn_index == SAMPLES_TO_SKIP -1){
+          current_sample_drawn_index = 0;
+        }
+
+    }
+  }
+
+}
+
+
+static void recall_loop(){
+  if(wasVButtonPressed(GBT_RECALL_BACK)){
+    // Reset the heart rate display.
+    cout << "recall back" << endl;
+    setStatus(STOPPED);
+    graphics_setup();
+    
+    return;
+  }
+
+
+  // convert the pot reading to the screen index
+  int screen_index = map(current_pot_reading, 0, MAX_POT_READING, 0, SCREENS_PER_RECORDING);
+  // change the measure index
+  measure_index = screen_index * SAMPLES_PER_SCREEN_AVAILABLE;
+
+
+
+  draw_recall_graph();
+
+
 }
 
 static void graphics_loop (void)
@@ -1586,6 +1792,11 @@ void init_graphical_buttons(){
   g_buttons[GBT_ABORT_SELECT].label = "cancel";
   g_buttons[GBT_ABORT_SELECT].x = SCREEN_WIDTH - 90;
   g_buttons[GBT_ABORT_SELECT].y = 65;
+
+  g_buttons[GBT_RECALL_BACK].label = "back";
+  g_buttons[GBT_RECALL_BACK].x = SCREEN_WIDTH - 70;
+  g_buttons[GBT_RECALL_BACK].y = SCREEN_HEIGHT - 65;
+
 
   
 
