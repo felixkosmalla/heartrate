@@ -135,7 +135,7 @@ int current_sample_drawn_index = 0;
 #define BUTTON_PADDING 5
 
 #define POTENTIOMETER 22
-#define MAX_POT_READING 4095
+#define MAX_POT_READING 4096
 
 static int current_pot_reading = 0;
 
@@ -1503,6 +1503,8 @@ static int get_file_list(){
 #define FILE_WIDTH 200
 
 
+
+
 static int previous_file_index = -1;
 
 
@@ -1557,7 +1559,7 @@ static void sd_menu_loop(){
   
 
   // map pot reading to index of file
-  file_index = map(current_pot_reading, 0, MAX_POT_READING, 0, filec-1);
+  file_index = map(current_pot_reading, 0, MAX_POT_READING, 0, filec);
 
   if(file_index != previous_file_index){
     previous_file_index = file_index;
@@ -1745,7 +1747,7 @@ static void recall_loop(){
 
 
   // convert the pot reading to the screen index
-  int screen_index = map(current_pot_reading, 0, MAX_POT_READING, 0, SCREENS_PER_RECORDING);
+  int screen_index = map(current_pot_reading, 0, MAX_POT_READING, 0, SCREENS_PER_RECORDING+1);
   // change the measure index
   measure_index = screen_index * SAMPLES_PER_SCREEN_AVAILABLE;
 
