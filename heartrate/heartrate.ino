@@ -29,7 +29,7 @@
 ///////////////////////////////////////////////////////////////////////////
 
 #define DEBUG // Uncomment to generate debug output on the serial port.
-//#define SILENT // Comment if you want sound
+#define SILENT // Comment if you want sound
 
 #ifdef DEBUG
     // Serial monitor output stream.
@@ -1076,6 +1076,9 @@ static ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC);
 // Screen buffer.
 static int32_t previous_values[VALUE_COUNT];
 
+// Beat buffer
+static bool previous_beats[VALUE_COUNT];
+
 // last drawn position.
 static int last_drawn_pos = 0; // this gets updated every loop and follows the measurement index
 
@@ -1147,6 +1150,10 @@ static int get_reading_at_index(int index){
   return measurement_buffer[index].sample;
 }
 
+static bool has_beat_at_index(int index){
+ return measurement_buffer[index].beat; 
+}
+
 static int convert_reading(int reading){
   return map(reading, 0, 4096, GRAPH_HEIGHT,0);
 }
@@ -1159,13 +1166,13 @@ static int convert_reading(int reading){
     static long lastTimeDrawn = 0;
 #endif
 
-
+bool found_beat = false;
 
 
 static void draw_reading (void)
 {
 
-
+    
 
     // check if we have samples to draw
     if(measure_index - last_drawn_pos > 0){ 
@@ -1182,12 +1189,22 @@ static void draw_reading (void)
         //cout << num_samples_to_draw << " " << measure_index  << endl;
       #endif
 
+
+
       // draw the samples. we have to downsample here or just skip 
       for(int i = 0; i < num_samples_to_draw; i++){
 
+        int sample_index = i + last_drawn_pos;
+
+        // look for the beat
+        if(has_beat_at_index(sample_index-1)){
+          found_beat = true;
+        }
+
+
         if(current_sample_drawn_index == 0){
 
-          int sample_index = i + last_drawn_pos;
+
           int sample = get_reading_at_index(sample_index);
 
           // previous y
@@ -1199,6 +1216,7 @@ static void draw_reading (void)
 
        
           
+
        
           // see if we can draw a line
           if(previous_screen_pos >= 0 && previous_values[previous_screen_pos] > 0){
@@ -1225,6 +1243,13 @@ static void draw_reading (void)
               delete_stop = 1;                            
             }
 
+            // see if we have to delete a hearbeat point
+            if(previous_beats[screen_pos]){
+              tft.drawLine(screen_pos * SCREEN_POS_TO_PIXEL, GRAPH_HEIGHT-10, screen_pos * SCREEN_POS_TO_PIXEL, GRAPH_HEIGHT, BACKGROUND_COLOR);
+            }
+
+
+
             // do the actual deletion
             if(delete_previous_segment == 1){
               tft.drawLine(delete_start * SCREEN_POS_TO_PIXEL, previous_values[delete_start], delete_stop * SCREEN_POS_TO_PIXEL, previous_values[delete_stop], ILI9341_BLACK);                 
@@ -1236,6 +1261,19 @@ static void draw_reading (void)
 
             // and draw the new reading
             tft.drawLine(previous_screen_pos * SCREEN_POS_TO_PIXEL, previous_values[previous_screen_pos], screen_pos * SCREEN_POS_TO_PIXEL, y_pos, ILI9341_YELLOW);
+          }
+
+
+
+          // see if we found a beat in the last readings
+          if(found_beat){
+            cout << "found beat!" << endl;
+            tft.drawLine(screen_pos * SCREEN_POS_TO_PIXEL, GRAPH_HEIGHT-10, screen_pos * SCREEN_POS_TO_PIXEL, GRAPH_HEIGHT, C_GREEN);
+            
+            found_beat = false;
+            previous_beats[screen_pos] = 1;
+          }else{
+            previous_beats[screen_pos] = 0;
           }
 
           // draw the pixel at the current position and continue
@@ -1250,6 +1288,8 @@ static void draw_reading (void)
 
 
         }
+
+
 
         current_sample_drawn_index++;
         if(current_sample_drawn_index == SAMPLES_TO_SKIP -1){
@@ -1496,6 +1536,7 @@ static void graphics_setup (void)
 
     for (int i = 0; i < VALUE_COUNT; i++) {
         previous_values[i] = -1;
+        previous_beats[i] = 0;
     }
 
     // Draw an empty calibration grid.
@@ -2104,6 +2145,8 @@ void resetVariables(void)
 
     // Graphics    
     last_drawn_pos = 0;
+
+    found_beat = false;
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -2165,7 +2208,6 @@ void loop (void)
             addToStabilizationBuffer (sample);
         }
 
-        if (status == RUNNING) {
         
             //////////////// LINEAR FILTERING STAGE ////////////////     
 
@@ -2191,6 +2233,8 @@ void loop (void)
             #ifdef DEBUG
                 analogWrite(A9, sample_transformed);
             #endif
+        
+        if (status == RUNNING) {
         
             // Analyze heart rate signal.
             bool bradycardia = false, tachycardia = false;
@@ -2287,3 +2331,6 @@ void loop (void)
     sound_loop();
     button_loop();
 }
+
+
+
