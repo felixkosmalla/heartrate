@@ -1750,6 +1750,8 @@ static void draw_recall_graph(void)
     // draw the samples. we have to downsample here or just skip 
     for(int i = 0; i < num_samples_to_draw; i++){
 
+        int sample_index = i + measure_index;
+
         // look for the beat
         if(has_beat_at_index(sample_index-1)){
           found_beat = true;
@@ -1763,7 +1765,7 @@ static void draw_recall_graph(void)
               #endif
 
         
-          int sample_index = i + measure_index;
+          
           // we don't want to draw measurements we don't have
           if(sample_index >= MEASUREMENT_SIZE ){
             break;
@@ -1839,7 +1841,7 @@ static void recall_loop(void)
 
 
   // convert the pot reading to the screen index
-  int screen_index = map(current_pot_reading, 0, MAX_POT_READING, 0, SCREENS_PER_RECORDING+1);
+  int screen_index = map(current_pot_reading, 0, MAX_POT_READING, 0, SCREENS_PER_RECORDING);
   // change the measure index
   measure_index = screen_index * SAMPLES_PER_SCREEN_AVAILABLE;
 
