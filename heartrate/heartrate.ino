@@ -29,7 +29,7 @@
 ///////////////////////////////////////////////////////////////////////////
 
 #define DEBUG // Uncomment to generate debug output on the serial port.
-//#define SILENT // Comment if you want sound
+#define SILENT // Comment if you want sound
 
 #ifdef DEBUG
     // Serial monitor output stream.
@@ -833,12 +833,27 @@ static void writeLogFile (void)
         uint16_t sample = measurement_buffer[i].sample;
         ASSERT ((0 <= sample) && (sample <= 4095));
         log_file.print(sample);
+        
         log_file.print(", ");
-        log_file.print(measurement_buffer[i].bradycardia);
+        if (measurement_buffer[i].bradycardia) {
+          log_file.print("1");
+        } else {
+          log_file.print("0");
+        }
+
         log_file.print(", ");
-        log_file.print(measurement_buffer[i].tachycardia);
+        if (measurement_buffer[i].tachycardia) {
+          log_file.print("1");
+        } else {
+          log_file.print("0");
+        }
+
         log_file.print(", ");
-        log_file.print(measurement_buffer[i].beat);
+        if (measurement_buffer[i].beat) {
+          log_file.print("1");
+        } else {
+          log_file.print("0");
+        }
 
         // Switch to next column.
         col = (col + 1) % 8;
@@ -856,8 +871,12 @@ static bool loadLogFile(void)
   // Open currently selected log file.
   ifstream log_file_in(log_files[file_index]);
 
+  //cout << "load " << log_files[file_index] << endl;
+
   // Make sure log is open.
   ASSERT (log_file_in.is_open());
+
+  //cout << "open file ok" << endl;
 
   // Skip the header of the log file.
   // TODO: Maybe we want to display the header data, then we should extract it.
@@ -868,24 +887,34 @@ static bool loadLogFile(void)
     return false;
   }
 
+  //cout << "skipped to load header ok" << endl;
+
   // Read all heart rate entries of the form: 
   // sample[0..4095], bradcardia[bool], tachycardia[bool], beat[bool]
+  
+  // Don't skip whitespaces when reading the log file.
+  log_file_in >> noskipws;
+
   char c;
   for (int i = 0; i < MEASUREMENT_SIZE; i++) {
     // Read heart rate sample.
     unsigned int sample_; log_file_in >> sample_;
     measurement_buffer[i].sample = sample_;
+    //cout << sample_ << ", ";
     if (log_file_in.fail()) return false;
-    log_file_in >> c; 
+    log_file_in >> c;
     if (log_file_in.fail()) return false;
     if (c != ',') return false;
     log_file_in >> c;
     if (log_file_in.fail()) return false;
-    if (c != ' ') return false;
+    if (c != ' ') {
+      return false;
+    }
 
     // Read bradycardia flag.
     bool bradycardia_; log_file_in >> bradycardia_;
     measurement_buffer[i].bradycardia = bradycardia_;
+    //cout << bradycardia_ << ", ";
     if (log_file_in.fail()) return false;
     log_file_in >> c; 
     if (log_file_in.fail()) return false;
@@ -897,6 +926,7 @@ static bool loadLogFile(void)
     // Read tachycardia flag.
     bool tachycardia_; log_file_in >> tachycardia_;
     measurement_buffer[i].tachycardia = tachycardia_;
+    //cout << tachycardia_ << ", ";
     if (log_file_in.fail()) return false;
     log_file_in >> c; 
     if (log_file_in.fail()) return false;
@@ -908,6 +938,7 @@ static bool loadLogFile(void)
     // Read heart beat flag.
     bool beat_; log_file_in >> beat_;
     measurement_buffer[i].beat = beat_;
+    //cout << beat_ << endl;
     if (log_file_in.fail()) return false;
     log_file_in >> c;
     if (log_file_in.fail()) return false;
@@ -951,7 +982,7 @@ static void getListOfLogFiles (void)
 
       // Skip deleted entry and entries for . and  ..
       if (dir.name[0] != DIR_NAME_DELETED && dir.name[0] != 0x7E && 
-          dir.name[0] != '.' && DIR_IS_FILE(&dir)) continue;
+          dir.name[0] != '.' && DIR_IS_FILE(&dir)) break;
     }
 
     if (filec >= MAX_NUM_OF_FILES) {
@@ -971,6 +1002,10 @@ static void getListOfLogFiles (void)
       j++;
     }
     filec++;
+  }
+
+  for (int k = 0; k < MAX_NUM_OF_FILES; ++k) {
+    cout << log_files[k] << endl;
   }
 }
 
@@ -1613,7 +1648,7 @@ static void setup_recall(void)
   hide_all_buttons();
   graphics_setup();
 
-  if (loadLogFile()) {
+  if (!loadLogFile()) {
     #ifdef DEBUG
       cout << pstr("LoadLogFile: error") << endl;
     #endif
@@ -1621,7 +1656,6 @@ static void setup_recall(void)
 
   // TODO, remove
   current_pot_reading = 0;
-
 }
 
 static void read_status_readings_from_buffer(int pos)
@@ -2216,7 +2250,7 @@ void loop (void)
                 measurement_buffer[measure_index].sample = sample_filtered;
                 measurement_buffer[measure_index].bradycardia = bradycardia;
                 measurement_buffer[measure_index].tachycardia = tachycardia;    
-                measurement_buffer[measure_index].beat = beat_occured;         
+                measurement_buffer[measure_index].beat = beat_occured;    
                 ++measure_index;
             }
 
