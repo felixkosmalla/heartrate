@@ -185,6 +185,8 @@ typedef struct {
 static graphical_button g_buttons[GRAPHICAL_BUTTON_NUM];
 static int current_active_gbutton = 0;
 
+bool found_beat = false;
+
 ///////////////////////////////////////////////////////////////////////////
 //                       FORWARD DECLARATIONS                            //
 ///////////////////////////////////////////////////////////////////////////
@@ -1166,7 +1168,7 @@ static int convert_reading(int reading){
     static long lastTimeDrawn = 0;
 #endif
 
-bool found_beat = false;
+
 
 
 static void draw_reading (void)
@@ -1714,6 +1716,11 @@ static void draw_recall_graph(void)
     // draw the samples. we have to downsample here or just skip 
     for(int i = 0; i < num_samples_to_draw; i++){
 
+        // look for the beat
+        if(has_beat_at_index(sample_index-1)){
+          found_beat = true;
+        }
+
 
         if(current_sample_drawn_index == 0){
 
@@ -1744,6 +1751,17 @@ static void draw_recall_graph(void)
           // see if we can draw a line
           if(previous_screen_pos >= 0 && previous_values[previous_screen_pos] > 0){
             tft.drawLine(previous_screen_pos * SCREEN_POS_TO_PIXEL, previous_values[previous_screen_pos], screen_pos * SCREEN_POS_TO_PIXEL, y_pos, ILI9341_YELLOW);
+          }
+
+          // see if we found a beat in the last readings
+          if(found_beat){
+            cout << "found beat!" << endl;
+            tft.drawLine(screen_pos * SCREEN_POS_TO_PIXEL, GRAPH_HEIGHT-10, screen_pos * SCREEN_POS_TO_PIXEL, GRAPH_HEIGHT, C_GREEN);
+            
+            found_beat = false;
+            previous_beats[screen_pos] = 1;
+          }else{
+            previous_beats[screen_pos] = 0;
           }
 
 
