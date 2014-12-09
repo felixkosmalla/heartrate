@@ -65,6 +65,8 @@ static volatile bool measurement_done = false;
 
 static const size_t SAMPLING_RATE = 250;        // 250Hz
 static const size_t MEASURE_DURATION = 30;      // 30sec
+#define MS_PER_SAMPLE  (1000 / SAMPLING_RATE)
+
 
 // Buffer holds 30sec * 250Hz samples obtained during a measurement.
 static const size_t MEASUREMENT_SIZE = SAMPLING_RATE*MEASURE_DURATION; // 7,500
@@ -1251,10 +1253,7 @@ static void draw_reading (void)
           // convert the sample value to draw
           int y_pos = convert_reading(sample);
 
-       
-          
 
-       
           // see if we can draw a line
           if(previous_screen_pos >= 0 && previous_values[previous_screen_pos] > 0){
 
@@ -1286,15 +1285,12 @@ static void draw_reading (void)
             }
 
 
-
             // do the actual deletion
             if(delete_previous_segment == 1){
               tft.drawLine(delete_start * SCREEN_POS_TO_PIXEL, previous_values[delete_start], delete_stop * SCREEN_POS_TO_PIXEL, previous_values[delete_stop], ILI9341_BLACK);                 
               draw_grid_intern((delete_start) * SCREEN_POS_TO_PIXEL, (delete_stop+1) * SCREEN_POS_TO_PIXEL);
               
             }
-
-
 
             // and draw the new reading
             tft.drawLine(previous_screen_pos * SCREEN_POS_TO_PIXEL, previous_values[previous_screen_pos], screen_pos * SCREEN_POS_TO_PIXEL, y_pos, ILI9341_YELLOW);
@@ -1541,7 +1537,7 @@ static float get_time_reading(int pos){
 static void draw_status_bar (void)
 {
     // Update the status bar if the status of the heart rate monitor has changed.
-    if (old_status != status) {
+    if (old_status != status && status != RECALL) {
         
         // Draw status text
         draw_label_value(getVerboseStatus(status),getVerboseStatus(old_status),  G_ECG_Y);
@@ -1579,8 +1575,8 @@ static void graphics_setup (void)
     // Draw an empty calibration grid.
     last_drawn_pos = 0;
     screen_pos = 0;
-    draw_grid();
 
+    draw_grid();
     setup_status_bar();
 }
 
@@ -1701,8 +1697,56 @@ static void setup_recall(void)
   current_pot_reading = 0;
 }
 
+
+/* reads three seconds into the past and three seconds into the future to calculate RR, BPM and Bac... */
 static void read_status_readings_from_buffer(int pos)
 {
+
+  int starting_pos = pos - (SAMPLING_RATE * 3);
+  int end_pos = pos + (SAMPLING_RATE * 3);
+
+  // normalize the borders
+  starting_pos = max(0, starting_pos);
+  end_pos = min(SAMPLING_RATE * MEASURE_DURATION -1, end_pos);
+
+  ASSERT(starting_pos >= 0);
+  ASSERT(end_pos < SAMPLING_RATE * MEASURE_DURATION);
+
+  int rcl_beat_count = 0;
+  int rcl_beat_buff[10]; // this should be large enough
+
+  // start searching
+  for(int i = starting_pos; i < end_pos; i++){
+    cout <<  i << endl;    
+    // check if there is a beat
+    if(has_beat_at_index(i)){
+      rcl_beat_buff[rcl_beat_count] = i;
+      rcl_beat_count++;
+    }
+  }
+
+  
+  int rcl_rr_sum = 0;
+  int rcl_last_time = rcl_beat_buff[0];
+
+  // iterate over beats and calculate RR
+  if(rcl_beat_count >= 2){
+
+    for(int i = 1; i < rcl_beat_count; i++){
+      int rcl_diff = rcl_beat_buff[i] - rcl_last_time;
+      rcl_rr_sum+=rcl_diff;
+      rcl_last_time = rcl_beat_buff[i];
+    }
+
+    current_rr = (rcl_rr_sum / rcl_beat_count) * MS_PER_SAMPLE;
+    current_bpm = 60000 / current_rr;
+
+    cout <<  "BPM " << current_bpm << endl;
+
+    // write out
+
+  }
+    
 
 }
 
@@ -1717,6 +1761,8 @@ static void draw_recall_graph(void)
   
 
   if(old_measurement_index != pos){
+    read_status_readings_from_buffer(pos);
+
     #ifdef DEBUG
       cout << "draw new screen" << endl;
     #endif
@@ -1729,7 +1775,7 @@ static void draw_recall_graph(void)
 
     // fill the screen black
     tft.fillRect(0,0,SCREEN_WIDTH, GRAPH_HEIGHT, BACKGROUND_COLOR);
-  
+
 
     // redraw the grid
     draw_grid();
@@ -1760,12 +1806,7 @@ static void draw_recall_graph(void)
 
         if(current_sample_drawn_index == 0){
 
-              #ifdef DEBUG
-                cout << "draw sample " << i << endl;
-              #endif
-
-        
-          
+           
           // we don't want to draw measurements we don't have
           if(sample_index >= MEASUREMENT_SIZE ){
             break;
@@ -1809,9 +1850,6 @@ static void draw_recall_graph(void)
             break;
           }
 
-
-
-        
         }
 
         // this is the actual skipping 
@@ -1821,6 +1859,14 @@ static void draw_recall_graph(void)
         }
 
     }
+
+
+    // draw the time label
+    float t = get_time_reading(measure_index);
+    draw_label_value(float_to_charp((float) t), "-----", G_TIME_LEFT_Y);
+
+    // draw the BPMs
+    s_draw_bpm(current_bpm);
   }
 
 }
@@ -1848,6 +1894,7 @@ static void recall_loop(void)
 
 
   draw_recall_graph();
+  draw_status_bar();  
 
 
 }
