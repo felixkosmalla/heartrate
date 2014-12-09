@@ -2463,14 +2463,14 @@ void loop (void)
         // Is a heart rate measurement currently running?
         } else if (status == RUNNING) {
             // Once the signal becomes instable wait until it is stable again.
-            /*
+            
             if (!is_stable) {
                 resetRecording();
                 // Claim that we are waiting until the signal of heart rate is stable again.
                 setup_status_bar();
                 setStatus(STABILIZING);
             }
-            */
+            
         }
         
         was_stable = is_stable;
