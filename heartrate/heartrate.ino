@@ -157,6 +157,7 @@ int current_sample_drawn_index = 0;
 #define G_ECG_Y GRAPH_HEIGHT + 10
 #define G_RR_Y G_ECG_Y + G_LABEL_PADDING_Y
 #define G_TIME_LEFT_Y G_RR_Y + G_LABEL_PADDING_Y
+#define G_DETECTED G_TIME_LEFT_Y + G_LABEL_PADDING_Y
 
 // buttons
 #define BUTTON_LABEL_SIZE 2
@@ -164,6 +165,13 @@ int current_sample_drawn_index = 0;
 
 #define POTENTIOMETER 22
 #define MAX_POT_READING 4096
+
+
+#define BRADYCARDIA_BPM 60
+#define TACHYCARDIA_BPM 110
+
+
+
 
 static int current_pot_reading = 0;
 
@@ -234,6 +242,47 @@ char* getVerboseStatus(Status s){
         return "-";
   }
 }
+
+char* getVerboseSymptom(int s){
+
+  switch(s){
+    case 0:
+      return "-";
+
+    case 1:
+      return "brad.";
+
+    case 2:
+      return "tach.";
+
+    default:
+      return "-";
+  };
+
+  return "-";
+}
+
+static int get_symptom(int bpm){
+
+  if(bpm < MIN_BPM){
+    return 0;
+  }
+
+  if(bpm < BRADYCARDIA_BPM){
+    return 1;
+  }
+
+  if(bpm > TACHYCARDIA_BPM){
+    return 2;
+  }
+
+  return 0;
+  
+}
+
+
+static int old_sym = -1;
+
 
 ///////////////////////////////////////////////////////////////////////////
 //                       HEART RATE SIGNAL PROCESSING                    //
@@ -313,9 +362,9 @@ bool analyzeHeartBeat (int sample, uint16_t& bpm, uint16_t& rr, bool& bradycardi
         rr = getRRInterval();
         bpm = (((uint16_t)60000)/rr);
 
-        if (bpm < 60) { // Has the patient Bradycardia?
+        if (bpm < BRADYCARDIA_BPM) { // Has the patient Bradycardia?
           bradycardia = true;
-        } else if (bpm > 110) { // Has the patient Tachycardia?
+        } else if (bpm > TACHYCARDIA_BPM) { // Has the patient Tachycardia?
           tachycardia = true;
         }
     }
@@ -1300,7 +1349,7 @@ static void draw_reading (void)
 
           // see if we found a beat in the last readings
           if(found_beat){
-            cout << "found beat!" << endl;
+            
             tft.drawLine(screen_pos * SCREEN_POS_TO_PIXEL, GRAPH_HEIGHT-10, screen_pos * SCREEN_POS_TO_PIXEL, GRAPH_HEIGHT, C_GREEN);
             
             found_beat = false;
@@ -1488,6 +1537,7 @@ static void setup_status_bar(void)
   draw_label("ECG", G_ECG_Y);  
   draw_label("RR", G_RR_Y);
   draw_label("Time", G_TIME_LEFT_Y);
+  draw_label("Symp", G_DETECTED);
 
   // draw the buttons
   hide_all_buttons();
@@ -1531,6 +1581,8 @@ static float get_time_reading(int pos){
   return secs;
 }
 
+
+
 /**
  * Draw the status bar of the heart rate monitor.
  */
@@ -1555,11 +1607,14 @@ static void draw_status_bar (void)
 
     float t = get_time_reading(measure_index);
     if(abs(t-old_time) > 0.025){
-
       draw_label_value(float_to_charp((float) t),float_to_charp((float) old_time), G_TIME_LEFT_Y);
-
       old_time = t;
-
+    }
+    int s = get_symptom(current_bpm);
+    
+    if(s != old_sym){
+      draw_label_value(getVerboseSymptom(s),getVerboseSymptom(old_sym), G_DETECTED);
+      old_sym = s;
     }
 }
 
@@ -1575,6 +1630,7 @@ static void graphics_setup (void)
     // Draw an empty calibration grid.
     last_drawn_pos = 0;
     screen_pos = 0;
+    old_sym = -1;
 
     draw_grid();
     setup_status_bar();
@@ -2407,12 +2463,14 @@ void loop (void)
         // Is a heart rate measurement currently running?
         } else if (status == RUNNING) {
             // Once the signal becomes instable wait until it is stable again.
+            /*
             if (!is_stable) {
                 resetRecording();
                 // Claim that we are waiting until the signal of heart rate is stable again.
                 setup_status_bar();
                 setStatus(STABILIZING);
             }
+            */
         }
         
         was_stable = is_stable;
