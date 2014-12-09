@@ -28,8 +28,8 @@
 //                                DEBUG                                  //
 ///////////////////////////////////////////////////////////////////////////
 
-#define DEBUG // Uncomment to generate debug output on the serial port.
-#define SILENT // Comment if you want sound
+//#define DEBUG  // Uncomment to generate debug output on the serial port.
+//#define SILENT // Uncomment to depress sound
 
 #ifdef DEBUG
     // Serial monitor output stream.
@@ -75,18 +75,21 @@ static volatile size_t measure_index = 0;
 typedef struct MeasurementPackage {  // Memory footprint: 2 bytes.
 
     unsigned int sample : 12;        // Samples have 12-bit resolution, i.e. range of [0..4095].    
-    bool bradycardia : 1;            // Bradycardia detected (1) or not (0).
-    bool tachycardia : 1;            // Tachycardia detected (1) or not (0).
+    //bool bradycardia : 1;            // Bradycardia detected (1) or not (0).
+    //bool tachycardia : 1;            // Tachycardia detected (1) or not (0).
     bool beat : 1;                   // Is true (1) iff there occured a beat, false (0) otherwise.
 
 };
 static volatile MeasurementPackage measurement_buffer[MEASUREMENT_SIZE];
 
+// True iff Bradycardia or Tachycardia was detected, otherwise false.
+static bool bradycardia_detected = false, tachycardia_detected = false;
+
 // The latest acquired raw and filtered sample of the heart rate signal.
 static volatile uint16_t heart_rate_signal_raw;
 // static volatile uint16_t heart_rate_signal_filtered;
 
-static int heart_beat_count = 0;
+static uint16_t heart_beat_count = 0;
 static bool saw_beat = false;
 static bool eyes_closed = false;
 static long last_time_eyes_closed = 0;
@@ -289,7 +292,7 @@ float getRRInterval (void) {
    return sum/((float)RR_INTERVAL_BUFFER_SIZE);
 }
 
-bool analyzeHeartBeat (int sample, uint16_t& bpm, uint16_t& rr, bool& bradycardia, bool& tachycardia)
+bool analyzeHeartBeat (int sample, uint16_t& bpm, uint16_t& rr) //, bool& bradycardia, bool& tachycardia)
 {
     bool see_beat = sample > HEART_BEAT_THRESHOLD;
 
@@ -309,11 +312,13 @@ bool analyzeHeartBeat (int sample, uint16_t& bpm, uint16_t& rr, bool& bradycardi
         rr = getRRInterval();
         bpm = (((uint16_t)60000)/rr);
 
+        /*
         if (bpm < 60) { // Has the patient Bradycardia?
           bradycardia = true;
         } else if (bpm > 110) { // Has the patient Tachycardia?
           tachycardia = true;
         }
+        */
     }
 
     if (eyes_closed && ((last_time_eyes_closed + EYES_CLOSED_DURATION) < millis())) {
@@ -785,6 +790,10 @@ static void createLogFile (void)
 
     // Write log file header.
     log_file.printf("MFSFK%d, %d\n", log_nr, SAMPLING_RATE);
+    log_file.printf("BPM %d\n", heart_beat_count*2);
+    log_file.printf("BRADYCARDIA %d\n", bradycardia_detected);
+    log_file.printf("TACHYCARDIA %d\n", tachycardia_detected);
+
     // Make the log persistent.
     log_file.sync();
 }
@@ -834,6 +843,7 @@ static void writeLogFile (void)
         ASSERT ((0 <= sample) && (sample <= 4095));
         log_file.print(sample);
         
+        /*
         log_file.print(", ");
         if (measurement_buffer[i].bradycardia) {
           log_file.print("1");
@@ -847,6 +857,7 @@ static void writeLogFile (void)
         } else {
           log_file.print("0");
         }
+        */
 
         log_file.print(", ");
         if (measurement_buffer[i].beat) {
@@ -871,23 +882,17 @@ static bool loadLogFile(void)
   // Open currently selected log file.
   ifstream log_file_in(log_files[file_index]);
 
-  //cout << "load " << log_files[file_index] << endl;
-
   // Make sure log is open.
   ASSERT (log_file_in.is_open());
 
-  //cout << "open file ok" << endl;
-
-  // Skip the header of the log file.
-  // TODO: Maybe we want to display the header data, then we should extract it.
-  log_file_in.ignore(UINTMAX_MAX, '\n');
-  log_file_in.skipWhite(); // Skip new line symbol.
-
-  if (log_file_in.fail()) {
-    return false;
+  // Skip the first four lines declaring the header of the log file.
+  for (uint8_t i = 0; i < 4; ++i) {
+    log_file_in.ignore(UINTMAX_MAX, '\n');
+    log_file_in.skipWhite(); // Skip new line symbol.
+    if (log_file_in.fail()) {
+      return false;
+    }
   }
-
-  //cout << "skipped to load header ok" << endl;
 
   // Read all heart rate entries of the form: 
   // sample[0..4095], bradcardia[bool], tachycardia[bool], beat[bool]
@@ -900,7 +905,6 @@ static bool loadLogFile(void)
     // Read heart rate sample.
     unsigned int sample_; log_file_in >> sample_;
     measurement_buffer[i].sample = sample_;
-    //cout << sample_ << ", ";
     if (log_file_in.fail()) return false;
     log_file_in >> c;
     if (log_file_in.fail()) return false;
@@ -911,10 +915,11 @@ static bool loadLogFile(void)
       return false;
     }
 
+    /*
+
     // Read bradycardia flag.
     bool bradycardia_; log_file_in >> bradycardia_;
     measurement_buffer[i].bradycardia = bradycardia_;
-    //cout << bradycardia_ << ", ";
     if (log_file_in.fail()) return false;
     log_file_in >> c; 
     if (log_file_in.fail()) return false;
@@ -926,7 +931,6 @@ static bool loadLogFile(void)
     // Read tachycardia flag.
     bool tachycardia_; log_file_in >> tachycardia_;
     measurement_buffer[i].tachycardia = tachycardia_;
-    //cout << tachycardia_ << ", ";
     if (log_file_in.fail()) return false;
     log_file_in >> c; 
     if (log_file_in.fail()) return false;
@@ -935,10 +939,11 @@ static bool loadLogFile(void)
     if (log_file_in.fail()) return false;
     if (c != ' ') return false;
 
+    */
+
     // Read heart beat flag.
     bool beat_; log_file_in >> beat_;
     measurement_buffer[i].beat = beat_;
-    //cout << beat_ << endl;
     if (log_file_in.fail()) return false;
     log_file_in >> c;
     if (log_file_in.fail()) return false;
@@ -1002,10 +1007,6 @@ static void getListOfLogFiles (void)
       j++;
     }
     filec++;
-  }
-
-  for (int k = 0; k < MAX_NUM_OF_FILES; ++k) {
-    cout << log_files[k] << endl;
   }
 }
 
@@ -1212,10 +1213,6 @@ static void draw_reading (void)
 
       // get the number of samples to draw
       int num_samples_to_draw = tmp_measure_index - last_drawn_pos;
-
-      #ifdef DEBUG
-        //cout << num_samples_to_draw << " " << measure_index  << endl;
-      #endif
 
       // draw the samples. we have to downsample here or just skip 
       for(int i = 0; i < num_samples_to_draw; i++){
@@ -1876,9 +1873,6 @@ void draw_button(int index){
 
   // draw the background
   uint16_t color = (bt.has_focus) ? C_BUTTON_COLOR_ACTIVE : C_BUTTON_COLOR;
-
-  //cout << bt.x << " " << bt.y << " " << bb_width << " " <<  bb_height << " " << bt.label << endl;
-
   tft.setCursor(bt.x + BUTTON_PADDING, bt.y + BUTTON_PADDING);
   tft.setTextSize(BUTTON_LABEL_SIZE);
   
@@ -2100,8 +2094,11 @@ static void resetRecording(void)
     rr_interval_i = 0;
     rr_interval_initialized = false;
 
-    ASSERT(measure_index ==0);
+    ASSERT(measure_index == 0);
 
+    // Reset detected syndrom
+    bradycardia_detected = false;
+    tachycardia_detected = false;
 }
 
 // Resets all variables.
@@ -2154,7 +2151,6 @@ void loop (void)
           cout << pstr("Runtime: ") << (current_time - last_time) << endl;  
         }
 
-        
         last_time = current_time;
     #endif
 
@@ -2227,10 +2223,10 @@ void loop (void)
             #endif
         
             // Analyze heart rate signal.
-            bool bradycardia = false, tachycardia = false;
+            //bool bradycardia = false, tachycardia = false;
             uint16_t bpm = 0;
             uint16_t rr = 0;
-            bool beat_occured = analyzeHeartBeat(sample_transformed, bpm, rr, bradycardia, tachycardia);
+            bool beat_occured = analyzeHeartBeat(sample_transformed, bpm, rr); //, bradycardia, tachycardia);
             
             // Did there occur any beat?
             if (beat_occured) {
@@ -2242,14 +2238,23 @@ void loop (void)
                 // Update statistics.
                 current_bpm = bpm;
                 current_rr = rr;
+
+                // Check whether there occured some arythmia.
+                if (MIN_BPM <= current_bpm && current_bpm < 60) {
+                  bradycardia_detected = true;
+                }
+
+                if (current_bpm > 110) {
+                  tachycardia_detected = true;
+                }
             }
 
             /* As long the heart rate monitor is running remember the
              * sample in the next free slot of the measurement buffer. */
             if ((0 <= measure_index) && (measure_index < MEASUREMENT_SIZE)) {
                 measurement_buffer[measure_index].sample = sample_filtered;
-                measurement_buffer[measure_index].bradycardia = bradycardia;
-                measurement_buffer[measure_index].tachycardia = tachycardia;    
+                //measurement_buffer[measure_index].bradycardia = bradycardia;
+                //measurement_buffer[measure_index].tachycardia = tachycardia;    
                 measurement_buffer[measure_index].beat = beat_occured;    
                 ++measure_index;
             }
