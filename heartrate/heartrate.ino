@@ -28,7 +28,7 @@
 ///////////////////////////////////////////////////////////////////////////
 
 //#define DEBUG  // Uncomment to generate debug output on the serial port.
-#define SILENT // Uncomment to depress sound
+//#define SILENT // Uncomment to depress sound
 
 //#ifdef DEBUG
     // Serial monitor output stream.
@@ -113,8 +113,11 @@ static long last_time_eyes_closed = 0;
 static uint16_t current_rr = 0;   // holds the averaged rr interval
 static uint16_t current_bpm = 0;
 
-static int HEART_BEAT_THRESHOLD = 6000;
-static int LAST_HEART_BEAT_THRESHOLD = 6000;
+// Heart beat detection thresholding.
+static const int START_HEART_BEAT_THRESHOLD = 6000;
+static const int MIN_HEART_BEAT_THRESHOLD = 2000;
+static int heart_beat_threshold = START_HEART_BEAT_THRESHOLD;
+static int base_heart_beat_threshold = START_HEART_BEAT_THRESHOLD;
 static const int EYES_CLOSED_DURATION = 200;
 
 // GRAPHICS
@@ -319,10 +322,6 @@ void addToRRIntervalBuffer (uint16_t rr_interval) {
     } else {
       rr_interval_buf[rr_interval_i] = rr_interval;
       rr_interval_i = (++rr_interval_i)%RR_INTERVAL_BUFFER_SIZE;
-
-      //if (!is_heart_rate_stable && rr_interval_i == 0) {
-      //  is_heart_rate_stable = true;
-      //}
     }
 }
 
@@ -338,35 +337,42 @@ static int threshold_tick = 0;
 
 bool detectHeartBeat (int sample, uint16_t& bpm, uint16_t& rr)
 {
-    bool see_beat = sample > HEART_BEAT_THRESHOLD;
+    bool see_beat = sample > heart_beat_threshold;
 
     if (!see_beat && !saw_beat && !eyes_closed) {
+
+      // Until we do not see any beat, lower the threshold each second sample.
       ++threshold_tick;
-      HEART_BEAT_THRESHOLD = (-2 * threshold_tick) + LAST_HEART_BEAT_THRESHOLD;
-      //cout << HEART_BEAT_THRESHOLD << endl;
+      if (threshold_tick % 2 == 0) {
+        heart_beat_threshold = (-2 * threshold_tick) + base_heart_beat_threshold;
+      }
+
+      // Once the threshold is too small, saturate the threshold.
+      // Actually, we do not want to detect noise.
+      if (heart_beat_threshold <= MIN_HEART_BEAT_THRESHOLD) {
+         heart_beat_threshold = MIN_HEART_BEAT_THRESHOLD;
+      }
     }
 
     bool beat_occured = false;
 
     if (see_beat && !saw_beat && !eyes_closed) {
 
-        LAST_HEART_BEAT_THRESHOLD = sample*0.95f; // drop 5 percentage of the amplitude, to be safe
-        HEART_BEAT_THRESHOLD = LAST_HEART_BEAT_THRESHOLD;
+        base_heart_beat_threshold = sample*0.9f; // drop 10% of the amplitude to be save.
+        //cout << sample << " " << base_heart_beat_threshold << endl;
+        heart_beat_threshold = base_heart_beat_threshold;
         threshold_tick = 0;
 
         eyes_closed = true;
         beat_occured = true;
 
-        //long current_time = millis();
-        //cout << measure_index << endl;
         uint16_t rr_interval = (measure_index - last_beat_measure_index)*MS_PER_SAMPLE;
-        // current_time - last_time_eyes_closed;
         addToRRIntervalBuffer(rr_interval);
         last_beat_measure_index = measure_index;
-        //last_time_eyes_closed = current_time;
 
-        rr = getRRInterval();
-        bpm = (((uint16_t)60000)/rr);
+        float rr_ = getRRInterval();
+        rr = rr_ + 0.5f;
+        bpm = ((60000.f)/rr_) + 0.5f;
     }
 
     if (eyes_closed && ((last_time_eyes_closed + EYES_CLOSED_DURATION) < millis())) {
@@ -496,10 +502,10 @@ static void setupHeartRateAcquisition (void)
 	 /**
 	  * Debug purpose only
 	  */
-    //#ifdef DEBUG
+    #ifdef DEBUG
        // Use full DAC resolution; same as our ADC input.
 	   analogWriteResolution(12);
-    //#endif
+    #endif
 
     // Initial high pass filter.
     highPassFilter_init(&hpf);
@@ -2174,32 +2180,33 @@ static void resetRecording(void)
     noInterrupts();
     // Clear the ADC IMU interrupts.
     adcInterrupt = false;
+    interrupts();
 
-    // Forget all the acquired samples.
+    // Reset the measurement of the heart rate.
     measure_index = 0;
     last_beat_measure_index = 0;
     measurement_done = false;
+
     resetStabilization();
     setStatus(STOPPED);
-    interrupts();
-
-    // Reset the heart rate display.
-    graphics_setup();
-
-    // Finally, stop the measurement of heart rate.
+       
     heart_beat_count = 0;
     saw_beat = false;
     eyes_closed = false;
     last_time_eyes_closed = 0;
     rr_interval_i = 0;
     rr_interval_initialized = false;
+    heart_beat_threshold = START_HEART_BEAT_THRESHOLD;
+    base_heart_beat_threshold = heart_beat_threshold;
     is_heart_rate_stable = false;
-
-    ASSERT(measure_index == 0);
+    threshold_tick = 0;
 
     // Reset detected syndrom
     bradycardia_detected = false;
     tachycardia_detected = false;
+
+    // Reset the heart rate display.
+    graphics_setup();
 }
 
 // Resets all variables.
@@ -2264,7 +2271,6 @@ void loop (void)
         // Start a new measurement in case it is not running currently.
         if (status == STOPPED) {
           
-          //resetStabilization();
           resetRecording();
 
           // Claim the heart rate measurement shall start.
@@ -2318,17 +2324,16 @@ void loop (void)
         addToMovingAverageBuffer(ma_buf, sample_squared);
         int sample_transformed = (int)(getAverage(ma_buf) + 0.5f);
         
-        //#ifdef DEBUG
+        #ifdef DEBUG
             analogWrite(A9, sample_transformed);
-        //#endif
+        #endif
         
         if (status == RUNNING) {
         
             // Analyze heart rate signal.
-            //bool bradycardia = false, tachycardia = false;
             uint16_t bpm = 0;
             uint16_t rr = 0;
-            bool beat_occured = detectHeartBeat(sample_transformed, bpm, rr); //, bradycardia, tachycardia);
+            bool beat_occured = detectHeartBeat(sample_transformed, bpm, rr);
             
             // Did there occur any beat?
             if (beat_occured) {
@@ -2350,8 +2355,6 @@ void loop (void)
                   // Update statistics.
                   current_bpm = bpm;
                   current_rr = rr;                
-                                 
-                  cout << current_bpm << endl;
 
                   // Check whether there occured some arythmia.
                   if (current_bpm < BRADYCARDIA_BPM) {
