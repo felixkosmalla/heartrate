@@ -6,9 +6,11 @@
  *                                                                       *
  *  Third-party code used:                                               *
  *                                                                       *
- *  + Button debounce code: http://arduino.cc/en/Tutorial/Debounce.      *
+ *  + Button debounce code: arduino.cc/en/Tutorial/Debounce.             *
  *  + SdFat library code from William Greiman.                           *
- *  + TODO: add further sources                                          *
+ *  + Assertion macro: www.acm.uiuc.edu/sigops/roll_your_own/2.a.html    *
+ *  + 5-point derivation filter:                                         *
+ *    www.physik.uni-freiburg.de/~severin/ECG_QRS_Detection.pdf          *
  *************************************************************************/
 
 ///////////////////////////////////////////////////////////////////////////
@@ -17,11 +19,10 @@
 
 #include "SPI.h"         /* SPI library is used to communicate with the
                           * ILI9341_t3 display and the SD card reader. */
-#include <ILI9341_t3.h>  // ILI9341_t3 library defines the display functions.
+#include <ILI9341_t3.h>  // ILI9341_t3 library allows access to the display.
 #include <SdFat.h>       // SdFat library is used to access the SD card.
-
-#include <assert.h>
-#include <math.h>
+     
+#include <math.h>        // Functions min() and max()
 
 ///////////////////////////////////////////////////////////////////////////
 //                                DEBUG                                  //
@@ -30,12 +31,12 @@
 //#define DEBUG  // Uncomment to generate debug output on the serial port.
 //#define SILENT // Uncomment to depress sound
 
-//#ifdef DEBUG
+#ifdef DEBUG
     // Serial monitor output stream.
     static ArduinoOutStream cout(Serial);
 
-    // Assertion Macro
-    // Adopted version from http://www.acm.uiuc.edu/sigops/roll_your_own/2.a.html
+    /* Assertion macro, adopted version from: 
+     * http://www.acm.uiuc.edu/sigops/roll_your_own/2.a.html */
     static void ASSERT_FAILURE(const char *exp, const char *file, 
         const char *function, int line)
     {
@@ -47,9 +48,9 @@
 
     #define ASSERT(exp)  if ((exp)) ; \
             else ASSERT_FAILURE(#exp, __FILE__, __FUNCTION__, __LINE__);
-//#else
-//    #define ASSERT(exp)
-//#endif
+#else
+    #define ASSERT(exp)
+#endif
 
 ///////////////////////////////////////////////////////////////////////////
 //                       FORWARD DECLARATIONS                            //
@@ -72,23 +73,20 @@ void hide_all_buttons();
 bool wasVButtonPressed(int index);
 
 ///////////////////////////////////////////////////////////////////////////
-//                       CONSTANTS / ENUMS / ETC                         //
+//                       CONSTANTS / ENUMS / VARIABLES                   //
 ///////////////////////////////////////////////////////////////////////////
-
-// The different states of the system.
-typedef enum Status { STOPPED, STABILIZING, RUNNING, SD_MENU, RECALL};
-
 
 // Signals whether the a measurment of the heart rate is done.
 static volatile bool measurement_done = false;
 
 static const size_t SAMPLING_RATE = 250;        // 250Hz
 static const size_t MEASURE_DURATION = 30;      // 30sec
-#define MS_PER_SAMPLE  (1000 / SAMPLING_RATE)
 
+// Number of milliseconds that are passing between each sample, here, 4ms.
+#define MS_PER_SAMPLE (1000 / SAMPLING_RATE)
 
 // Buffer holds 30sec * 250Hz samples obtained during a measurement.
-static const size_t MEASUREMENT_SIZE = SAMPLING_RATE*MEASURE_DURATION; // 7,500
+static const size_t MEASUREMENT_SIZE = SAMPLING_RATE*MEASURE_DURATION; // 7500 samples in total.
 // indicated the current position of the recording
 static volatile size_t measure_index = 0;
 
@@ -115,9 +113,7 @@ static uint16_t current_bpm = 0;
 
 // Heart beat detection thresholding.
 static const int START_HEART_BEAT_THRESHOLD = 6000;
-static const int MIN_HEART_BEAT_THRESHOLD = 2000;
 static int heart_beat_threshold = START_HEART_BEAT_THRESHOLD;
-static int base_heart_beat_threshold = START_HEART_BEAT_THRESHOLD;
 static const int EYES_CLOSED_DURATION = 200;
 
 // GRAPHICS
@@ -141,7 +137,7 @@ static const int EYES_CLOSED_DURATION = 200;
 // number of values which are actually displayed one at a time
 #define VALUE_COUNT  (SAMPLES_PER_SQUARE * NUMBER_OF_LARGE_SQUARES) // 10 * 8; 
 
-int current_sample_drawn_index = 0;
+static int current_sample_drawn_index = 0;
 
 #define G_BPM_WIDTH 70
 
@@ -205,8 +201,10 @@ typedef struct {
 
 static graphical_button g_buttons[GRAPHICAL_BUTTON_NUM];
 static int current_active_gbutton = 0;
-
 static bool found_beat = false;
+
+// The different states of the system.
+typedef enum Status { STOPPED, STABILIZING, RUNNING, SD_MENU, RECALL};
 
 /* Status of the heart rate monior.
  *
@@ -334,52 +332,86 @@ float getRRInterval (void) {
 }
 
 static int threshold_tick = 0;
+static uint16_t last_beat_threshold = START_HEART_BEAT_THRESHOLD;
 
 bool detectHeartBeat (int sample, uint16_t& bpm, uint16_t& rr)
 {
+    // Check whether we encounter a heart beat.
+    // We see a heart beat if the amplitude of the newest
+    // sample is higher than the threshold.
     bool see_beat = sample > heart_beat_threshold;
 
+    // When the newest sample is not classified as being
+    // part of a heart beat and the previously processed
+    // sample was neither part of a heart beat, then we
+    // adopt the detection threshold.
+    // Note, we consider this adoption only when we look
+    // at the signal, thus, the eyes of the detection are
+    // not closed.
     if (!see_beat && !saw_beat && !eyes_closed) {
 
-      // Until we do not see any beat, lower the threshold each second sample.
-      ++threshold_tick;
-      if (threshold_tick % 2 == 0) {
-        heart_beat_threshold = (-2 * threshold_tick) + base_heart_beat_threshold;
-      }
+        // Remember that we did not find a heart beat.
+        ++threshold_tick;
 
-      // Once the threshold is too small, saturate the threshold.
-      // Actually, we do not want to detect noise.
-      if (heart_beat_threshold <= MIN_HEART_BEAT_THRESHOLD) {
-         heart_beat_threshold = MIN_HEART_BEAT_THRESHOLD;
-      }
+        // All 500 ticks (or samples) we did not find a heart beat,
+        // that is, each 2 seconds we half the threshold for the
+        // heart beat detection. This makes the detection twice as
+        // sensitive as before.
+        if ((threshold_tick % 500) == 0) { // 500 ticks(samples) equals 2 seconds 
+          heart_beat_threshold /= 2;  // Half the heart beat threshold.
+
+          // If the new heart beat threshold is lower than the amplitude
+          // of the newest sample, we set the threshold as being 4 times the
+          // amplitude of the newest sample. We do so in order to avoid
+          // noise to be detected as heart beats.
+          if (heart_beat_threshold < sample) {
+            heart_beat_threshold = 4*sample;
+          }
+        }
     }
 
     bool beat_occured = false;
 
+    // Did we encouter a heart beat now?
     if (see_beat && !saw_beat && !eyes_closed) {
 
-        base_heart_beat_threshold = sample*0.9f; // drop 10% of the amplitude to be save.
-        //cout << sample << " " << base_heart_beat_threshold << endl;
-        heart_beat_threshold = base_heart_beat_threshold;
-        threshold_tick = 0;
-
-        eyes_closed = true;
+        // Remember that a heart beat occurred.
         beat_occured = true;
 
+        // Each time we encounter a heart beat, we adopt the threshold
+        // for the detection of a subsequent heart beat to be a weighted
+        // average of the currently used heart beat threshold and the amplitude
+        // of the newest sample. This way we are more adoptive to the jitter
+        // of the heart rate signal strengh.
+        heart_beat_threshold = (0.2f * sample) + (0.8f * heart_beat_threshold);
+        threshold_tick = 0;
+
+        // Computer the R-R peak interval.
         uint16_t rr_interval = (measure_index - last_beat_measure_index)*MS_PER_SAMPLE;
         addToRRIntervalBuffer(rr_interval);
         last_beat_measure_index = measure_index;
 
         float rr_ = getRRInterval();
         rr = rr_ + 0.5f;
+
+        // Predict the current BPM based on the current R-R peak interval.
         bpm = ((60000.f)/rr_) + 0.5f;
+
+        // Close the eyes, thus, we don't look at the heart rate signal.
+        // Actually, we will open the eyes again after 200ms. This amount is
+        // physiological proper since there cannot be a QRS wave appear in
+        // less time measured from moment the current heart beat was encountered.
+        eyes_closed = true;
+        last_time_eyes_closed = millis();
     }
 
+    // Remember whether we saw a heart beat recently.
+    saw_beat = see_beat;
+
+    // Open the eyes, thus, look at the signal again once the 200ms passed.
     if (eyes_closed && ((last_time_eyes_closed + EYES_CLOSED_DURATION) < millis())) {
         eyes_closed = false;
     }
-
-    saw_beat = see_beat;
 
     return beat_occured;
 }
@@ -2052,14 +2084,14 @@ long last_time;
 
 void setup (void)
 {
-    //#ifdef DEBUG
+    #ifdef DEBUG
         // Initialize serial port with baud rate 115200bips.
         Serial.begin(115200);
         // Wait until serial monitor is openend.
         while (!Serial) {}       
         // Small delay to ensure the serial port is initialized.
         delay(200);
-    //#endif
+    #endif
 
     #ifdef DEBUG
         cout << pstr("Initializing Button...");
@@ -2197,7 +2229,7 @@ static void resetRecording(void)
     rr_interval_i = 0;
     rr_interval_initialized = false;
     heart_beat_threshold = START_HEART_BEAT_THRESHOLD;
-    base_heart_beat_threshold = heart_beat_threshold;
+    last_beat_threshold = heart_beat_threshold;
     is_heart_rate_stable = false;
     threshold_tick = 0;
 
