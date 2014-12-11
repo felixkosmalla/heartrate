@@ -250,6 +250,7 @@ static void setStatus(Status s)
 //                       HELPER FUNCTIONS                                //
 ///////////////////////////////////////////////////////////////////////////
 
+// returns the verbose system status
 char* getVerboseStatus(Status s){
   switch (s) {
       case STOPPED:
@@ -271,6 +272,7 @@ char* getVerboseStatus(Status s){
   }
 }
 
+// returns the verbose symptom
 char* getVerboseSymptom(int s){
 
   switch(s){
@@ -290,6 +292,7 @@ char* getVerboseSymptom(int s){
   return "-";
 }
 
+// 
 static int get_symptom(int bpm){
 
   if(bpm < BRADYCARDIA_BPM){
@@ -310,7 +313,7 @@ static int old_sym = -1;
 //                       HEART RATE SIGNAL PROCESSING                    //
 ///////////////////////////////////////////////////////////////////////////
 
-static const int RR_INTERVAL_BUFFER_SIZE = 4;
+static const int RR_INTERVAL_BUFFER_SIZE = 4;   // we store 4 unique RR interval which are then averaged to be displayed
 static uint16_t rr_interval_buf[RR_INTERVAL_BUFFER_SIZE] = {0};
 static size_t rr_interval_i = 0;
 static bool rr_interval_initialized = false;
@@ -1053,7 +1056,7 @@ static bool wait_for_stable = false;
 
 static void addToStabilizationBuffer(uint16_t sample)
 {
-    if (!stab_buf_initialized) {
+    if (!stab_buf_initialized) { // initialize the stabilization buffer if not already happened
         for (size_t i = 0; i < STAB_MOVING_INTEGRATOR_SIZE; i++) {
             stabilizing_buffer[i] = sample;
         }
@@ -1101,6 +1104,7 @@ static bool isSignalStable (void)
 static const int PIEZO_TRANSDUCER = 20;
 static int stop_beep_at = 0;
 
+// is called in every main loop, clears the beeping
 static void sound_loop()
 {
   if (millis() > stop_beep_at) {
@@ -1108,6 +1112,8 @@ static void sound_loop()
   }
 }
 
+// starts beeping and sets the stop time
+// @param short duration in milliseconds
 static void beep(short duration)
 {
   #ifndef SILENT
@@ -1193,14 +1199,17 @@ static void draw_grid (void)
     tft.drawLine(0,GRAPH_HEIGHT,SCREEN_WIDTH,GRAPH_HEIGHT, LINE_COLOR);
 }
 
+// returns the filtered ECG reading at the specified indec
 static int get_reading_at_index(int index){
   return measurement_buffer[index].sample;
 }
 
+// returns true if there was a detected hearbeat at the specified index
 static bool has_beat_at_index(int index){
  return measurement_buffer[index].beat; 
 }
 
+// converts the filtered ECG reading to the actual Y position in the graph
 static int convert_reading(int reading){
   return map(reading, 0, 4096, GRAPH_HEIGHT,0);
 }
@@ -1212,7 +1221,7 @@ static int convert_reading(int reading){
     static long lastTimeDrawn = 0;
 #endif
 
-
+// draws the outstanding ECG readings
 static void draw_reading (void)
 {
     // check if we have samples to draw
@@ -1304,6 +1313,7 @@ static void draw_reading (void)
 
         }
 
+        // Skip the measurements we cannot display because of diplay resolution
         current_sample_drawn_index++;
         if(current_sample_drawn_index == SAMPLES_TO_SKIP -1){
           current_sample_drawn_index = 0;
@@ -1314,6 +1324,7 @@ static void draw_reading (void)
     }
 }
 
+// calculated a bounding box of a text with a given scale (text size)
 static void get_boundingbox(char* text, int scale, int *width, int *height)
 {
   int len = strlen(text);
@@ -1321,6 +1332,7 @@ static void get_boundingbox(char* text, int scale, int *width, int *height)
   *height = (7+1)*scale;
 }
 
+// deletes a text by drawing a rectangle in the size of the text's bounding box
 static void delete_text_(char* text, int scale, int x, int y, uint16_t bg_color)
 {
   // get the bounding box
@@ -1329,11 +1341,13 @@ static void delete_text_(char* text, int scale, int x, int y, uint16_t bg_color)
   tft.fillRect(x, y, width, height, bg_color);
 }
 
+// deletes a text by drawing a rectangle in the size of the text's bounding box
 static void delete_text(char* text, int scale, int x, int y, uint16_t bg_color)
 {
   delete_text_(text, scale, x, y, bg_color);
 }
 
+// deletes a number by drawing a rectangle in the size of the text's bounding box
 static void delete_text(int num, int scale, int x, int y, uint16_t bg_color)
 {
   // convert chart pointer
@@ -1347,6 +1361,7 @@ static int old_beat_status = 0;
 #define BEAT_LENGTH 80
 static int turn_beat_off_at = 0;
 
+// draws a green circle on every heart beat
 static void s_draw_beat(int on)
 {
   if(old_beat_status == on){
@@ -1387,6 +1402,7 @@ static void draw_label(char* label, int y)
   tft.print(label);
 }
 
+
 static char* float_to_charp(float f)
 {
   char buf[20];
@@ -1401,6 +1417,7 @@ static char* int_to_charp(int i)
   return buf;
 }
 
+// draws the value to a specified label
 static void draw_label_value(char* new_value, char *old_value, int y){
   // delete the old label value
   delete_text(old_value, G_LABEL_SIZE, G_LABEL_VALUE_MARGIN, y, C_STATUS_BAR);
@@ -1446,6 +1463,8 @@ static void beat_draw_loop(void)
   s_draw_bpm(current_bpm);
 }
 
+// setups the status bar
+// this includes, background color and label, and button
 static void setup_status_bar(void)
 {
   // fill the grey rect which is used for the background and the BPM
@@ -1542,6 +1561,7 @@ static void draw_status_bar (void)
     }
 }
 
+// deletes screen and draws both, grid and status bar
 static void graphics_setup (void)
 {
     tft.fillScreen(ILI9341_BLACK);
@@ -1863,7 +1883,7 @@ static void draw_recall_graph(void)
 
 }
 
-
+// called everytime if the system is in RECALL state
 static void recall_loop(void)
 {
   if(wasVButtonPressed(GBT_RECALL_BACK)){
@@ -2396,8 +2416,7 @@ void loop (void)
                 // Claim that we are waiting until the signal of heart rate is stable again.
                 setup_status_bar();
                 setStatus(STABILIZING);
-            }
-            
+            }            
         }
         
         was_stable = is_stable;
