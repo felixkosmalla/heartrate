@@ -4,13 +4,15 @@
  * Authors: Max-Ferdinand Gerhard Suffel (1427741)                       *
  *          Felix Kosmalla (1430813)                                     *
  *                                                                       *
- *  Third-party code used:                                               *
+ *  Third-party code used/generated:                                     *
  *                                                                       *
  *  + Button debounce code: arduino.cc/en/Tutorial/Debounce.             *
  *  + SdFat library code from William Greiman.                           *
  *  + Assertion macro: www.acm.uiuc.edu/sigops/roll_your_own/2.a.html    *
  *  + 5-point derivation filter:                                         *
  *    www.physik.uni-freiburg.de/~severin/ECG_QRS_Detection.pdf          *
+ *  + High pass (FIR) filter: http://t-filter.appspot.com                *
+ *  + Low pass (IIR) filter: www-users.cs.york.ac.uk/~fisher/mkfilter/   *
  *************************************************************************/
 
 ///////////////////////////////////////////////////////////////////////////
@@ -29,7 +31,7 @@
 ///////////////////////////////////////////////////////////////////////////
 
 //#define DEBUG  // Uncomment to generate debug output on the serial port.
-//#define SILENT // Uncomment to depress sound
+#define SILENT // Uncomment to depress sound
 
 #ifdef DEBUG
     // Serial monitor output stream.
@@ -63,7 +65,6 @@ static void pdbInit(void);
 static void resetStabilization(void);
 static void setup_sd_menu(void);
 static void setup_recall(void);
-static void resetVariables(void);
 
 // graphical buttons
 void init_graphical_buttons();
@@ -105,16 +106,19 @@ static volatile uint16_t heart_rate_signal_raw;
 // static volatile uint16_t heart_rate_signal_filtered;
 
 static uint16_t heart_beat_count = 0;
-static bool saw_beat = false;
-static bool eyes_closed = false;
-static long last_time_eyes_closed = 0;
 static uint16_t current_rr = 0;   // holds the averaged rr interval
 static uint16_t current_bpm = 0;
 
 // Heart beat detection thresholding.
+static const int EYES_CLOSED_DURATION = 200;
+static int threshold_tick = 0;
+
 static const int START_HEART_BEAT_THRESHOLD = 6000;
 static int heart_beat_threshold = START_HEART_BEAT_THRESHOLD;
-static const int EYES_CLOSED_DURATION = 200;
+
+static bool saw_beat = false;
+static bool eyes_closed = false;
+static long last_time_eyes_closed = 0;
 
 // GRAPHICS
 // Dimensions of the display.
@@ -204,13 +208,15 @@ static int current_active_gbutton = 0;
 static bool found_beat = false;
 
 // The different states of the system.
-typedef enum Status { STOPPED, STABILIZING, RUNNING, SD_MENU, RECALL};
-
-/* Status of the heart rate monior.
- *
+/*
  * STOPPED: No heart rate measurement running.
  * STABILIZING: Wait until signal is stable before starting the heart rate measurement.
- * RUNNING: Heart rate measruement is running, signal is stable. */ 
+ * RUNNING: Heart rate measruement is running, signal is stable. 
+ * SD_MENU: Displays a list of all possible log files to be recalled. 
+ * RECALL: Shows the heart rate measurement of a recalled file on the display. */
+typedef enum Status { STOPPED, STABILIZING, RUNNING, SD_MENU, RECALL};
+
+/* Current and previous status of the heart rate monior. */ 
 static Status status = STOPPED, old_status = RUNNING;
 
 /**
@@ -250,7 +256,7 @@ char* getVerboseStatus(Status s){
         return "stopped";
         break;
       case STABILIZING:
-        return "unstable";
+        return "stabilizing";
         break;
       case RUNNING:
         return "recording";
@@ -309,7 +315,7 @@ static uint16_t rr_interval_buf[RR_INTERVAL_BUFFER_SIZE] = {0};
 static size_t rr_interval_i = 0;
 static bool rr_interval_initialized = false;
 static size_t last_beat_measure_index = 0;
-static bool is_heart_rate_stable = false;
+static bool was_heart_rate_found = false;
 
 void addToRRIntervalBuffer (uint16_t rr_interval) {
     if (!rr_interval_initialized) {
@@ -331,15 +337,12 @@ float getRRInterval (void) {
    return sum/((float)RR_INTERVAL_BUFFER_SIZE);
 }
 
-static int threshold_tick = 0;
-static uint16_t last_beat_threshold = START_HEART_BEAT_THRESHOLD;
-
 bool detectHeartBeat (int sample, uint16_t& bpm, uint16_t& rr)
 {
     // Check whether we encounter a heart beat.
     // We see a heart beat if the amplitude of the newest
-    // sample is higher than the threshold.
-    bool see_beat = sample > heart_beat_threshold;
+    // sample is higher than equal the threshold.
+    bool see_beat = (sample >= heart_beat_threshold);
 
     // When the newest sample is not classified as being
     // part of a heart beat and the previously processed
@@ -348,7 +351,7 @@ bool detectHeartBeat (int sample, uint16_t& bpm, uint16_t& rr)
     // Note, we consider this adoption only when we look
     // at the signal, thus, the eyes of the detection are
     // not closed.
-    if (!see_beat && !saw_beat && !eyes_closed) {
+    if (!see_beat && !saw_beat && !eyes_closed) {  
 
         // Remember that we did not find a heart beat.
         ++threshold_tick;
@@ -367,12 +370,12 @@ bool detectHeartBeat (int sample, uint16_t& bpm, uint16_t& rr)
           if (heart_beat_threshold < sample) {
             heart_beat_threshold = 4*sample;
           }
-        }
+        }        
     }
 
     bool beat_occured = false;
 
-    // Did we encouter a heart beat now?
+    // Did we encouter a heart beat?
     if (see_beat && !saw_beat && !eyes_closed) {
 
         // Remember that a heart beat occurred.
@@ -383,10 +386,10 @@ bool detectHeartBeat (int sample, uint16_t& bpm, uint16_t& rr)
         // average of the currently used heart beat threshold and the amplitude
         // of the newest sample. This way we are more adoptive to the jitter
         // of the heart rate signal strengh.
-        heart_beat_threshold = (0.2f * sample) + (0.8f * heart_beat_threshold);
+        heart_beat_threshold = (0.125f * sample) + (0.875f * heart_beat_threshold) + 0.5f;
         threshold_tick = 0;
-
-        // Computer the R-R peak interval.
+        
+        // Compute the R-R peak interval.
         uint16_t rr_interval = (measure_index - last_beat_measure_index)*MS_PER_SAMPLE;
         addToRRIntervalBuffer(rr_interval);
         last_beat_measure_index = measure_index;
@@ -569,46 +572,32 @@ inline static uint16_t aqcuireHeartRateSignal (void)
 	return heart_rate;
 }
 
-// Moving average 
-// FIXME: refactor this, since the array is not resizable, that construction does not make sense.
-#define BUF_SIZE 32
-struct MovingAverageBuffer {
-    float buf[BUF_SIZE];
-    size_t i;
-    bool initialized;
-} ma_buf;
+// Moving Integrator of length 32
+#define MOVING_INTEGRATOR_SIZE 32
+float movingintegrator_buf[MOVING_INTEGRATOR_SIZE];
+size_t movingintegrator_i = 0;
+bool movingintegrator_init = 0;
 
-/**
- * Adds a given sample to the provided moving average buffer.
- * 
- * @param m     Instance of a moving average buffer.
- * @param val   Sample to be added to the given moving average buffer.
- */
-void addToMovingAverageBuffer (struct MovingAverageBuffer &m, float val)
+void addToMovingIntegratorBuffer (float val)
 {
-    if (!m.initialized) {
-      for (size_t i = 0; i < BUF_SIZE; i++) {
-        m.buf[i] = val;
+    if (!movingintegrator_init) {
+      for (size_t i = 0; i < MOVING_INTEGRATOR_SIZE; i++) {
+        movingintegrator_buf[i] = val;
       }
-      m.initialized = true;
+      movingintegrator_init = true;
     } else {
-      m.buf[m.i] = val;
-      m.i = (++m.i)%BUF_SIZE;
+      movingintegrator_buf[movingintegrator_i] = val;
+      movingintegrator_i = (++movingintegrator_i)%MOVING_INTEGRATOR_SIZE;
     }
 }
 
-/**
- * Computer the average of a given moving average buffer.
- * 
- * @return Average of the samples stored in the given moving average buffer.
- */
-float getAverage (struct MovingAverageBuffer &m)
+float getIntergral (void)
 {
    float sum = 0.0f;
-   for (size_t i = 0; i < BUF_SIZE; i++) {
-        sum += m.buf[i];
+   for (size_t i = 0; i < MOVING_INTEGRATOR_SIZE; i++) {
+        sum += movingintegrator_buf[i];
    }
-   return sum/((float)BUF_SIZE);
+   return sum/((float)MOVING_INTEGRATOR_SIZE);
 }
 
 /* ADC interrupt routine.
@@ -749,7 +738,6 @@ static void pdbInit (void)
 	PDB0_IDLY = 0;
 
 	// Enable pre-trigger 0 and 1.
-	//PDB0_CH0C1 = PDB_CH0C1_TOS | PDB_CH0C1_EN;
   PDB0_CH0C1 = PDB_C1_EN(0x01) | PDB_C1_TOS(0x01) |
                PDB_C1_EN(0x02) | PDB_C1_TOS(0x02);
 
@@ -874,9 +862,9 @@ static void createLogFile (void)
 
     // Write log file header.
     log_file.printf("MFSFK%d, %d\n", log_nr, SAMPLING_RATE);
-    log_file.printf("BPM %d\n", heart_beat_count*2);
-    log_file.printf("BRADYCARDIA %d\n", bradycardia_detected);
-    log_file.printf("TACHYCARDIA %d\n", tachycardia_detected);
+    log_file.printf("ESTIMATED BPM %d\n", heart_beat_count*2);
+    log_file.printf("BRADYCARDIA %s\n", bradycardia_detected ? "YES" : "NO");
+    log_file.printf("TACHYCARDIA %s\n", tachycardia_detected ? "YES" : "NO");
 
     // Make the log persistent.
     log_file.sync();
@@ -1057,8 +1045,8 @@ static void getListOfLogFiles (void)
 ///////////////////////////////////////////////////////////////////////////
 
 // Stabilization window buffer.
-static const size_t STAB_BUF_SIZE = 250;
-static uint16_t stabilizing_buffer[STAB_BUF_SIZE];
+static const size_t STAB_MOVING_INTEGRATOR_SIZE = 250;
+static uint16_t stabilizing_buffer[STAB_MOVING_INTEGRATOR_SIZE];
 static size_t stab_buf_i = 0;
 static size_t stab_buf_initialized = false;
 
@@ -1073,14 +1061,14 @@ static bool wait_for_stable = false;
 static void addToStabilizationBuffer(uint16_t sample)
 {
     if (!stab_buf_initialized) {
-        for (size_t i = 0; i < STAB_BUF_SIZE; i++) {
+        for (size_t i = 0; i < STAB_MOVING_INTEGRATOR_SIZE; i++) {
             stabilizing_buffer[i] = sample;
         }
         stab_buf_initialized = true;
         stab_buf_i = 0;
     } else {
         stabilizing_buffer[stab_buf_i] = sample;
-        stab_buf_i = (stab_buf_i + 1) % STAB_BUF_SIZE;
+        stab_buf_i = (stab_buf_i + 1) % STAB_MOVING_INTEGRATOR_SIZE;
 
         // Reset the stabilization heuristic each time the complete window is moved.
         if (stab_buf_i == 0) {
@@ -1101,7 +1089,7 @@ static uint32_t min_stab_val = 5000;
 static bool isSignalStable (void)
 {
     // Compute the maxima and minima of the stabilization window.
-    for (int i = 0; i < STAB_BUF_SIZE; i++) {
+    for (int i = 0; i < STAB_MOVING_INTEGRATOR_SIZE; i++) {
         max_stab_val = max(max_stab_val, stabilizing_buffer[i]);
         min_stab_val = min(min_stab_val, stabilizing_buffer[i]);
     }
@@ -1171,13 +1159,6 @@ static int screen_pos = 0; // range [0, VALUE_COUNT[
  */
 static void draw_grid_intern (int from, int to)
 {
-    /*
-    ASSERT(NUMBER_OF_LARGE_SQUARES == 8);
-    ASSERT(LARGE_SQUARE_WIDTH == 40);
-    ASSERT(SAMPLES_PER_SQUARE_AVAILABLE == 50);
-    ASSERT(SMALL_SQUARE_LENGTH == 8);
-    */
-
     from = max(0, from);
     to = min(to, SCREEN_WIDTH-1);
 
@@ -1269,10 +1250,8 @@ static void draw_reading (void)
           // previous y
           int previous_screen_pos = screen_pos-1;
 
-
           // convert the sample value to draw
           int y_pos = convert_reading(sample);
-
 
           // see if we can draw a line
           if(previous_screen_pos >= 0 && previous_values[previous_screen_pos] > 0){
@@ -1323,9 +1302,6 @@ static void draw_reading (void)
             previous_beats[screen_pos] = 0;
           }
 
-          // draw the pixel at the current position and continue
-          //tft.drawPixel(screen_pos * SCREEN_POS_TO_PIXEL, y_pos, ILI9341_YELLOW);
-
           previous_values[screen_pos] = y_pos;
 
           screen_pos++;
@@ -1333,24 +1309,16 @@ static void draw_reading (void)
             screen_pos = 0;
           }
 
-
         }
-
-
 
         current_sample_drawn_index++;
         if(current_sample_drawn_index == SAMPLES_TO_SKIP -1){
           current_sample_drawn_index = 0;
         }
-
-
       }
 
       last_drawn_pos = tmp_measure_index;
-
-    } 
-
-   
+    }
 }
 
 static void get_boundingbox(char* text, int scale, int *width, int *height)
@@ -1449,7 +1417,6 @@ static void draw_label_value(char* new_value, char *old_value, int y){
   tft.setTextSize(G_LABEL_SIZE);
   tft.setTextColor(C_TEXT_COLOR);
   tft.print(new_value);
-
 }
 
 static int old_bpm = 0;
@@ -1459,7 +1426,7 @@ static int old_bpm = 0;
 */
 static void s_draw_bpm(int bpm)
 {
-  if(!is_heart_rate_stable || old_bpm == bpm){
+  if(!was_heart_rate_found || old_bpm == bpm){
     return;
   }
 
@@ -1536,7 +1503,6 @@ static void setup_status_bar(void)
 }
 
 static long old_rr = 0;
-
 static float old_time = 0;
 
 /* converts the timestamp at position 'pos' to a human readable time format */
@@ -1545,8 +1511,6 @@ static float get_time_reading(int pos){
   
   return secs;
 }
-
-
 
 /**
  * Draw the status bar of the heart rate monitor.
@@ -1564,7 +1528,7 @@ static void draw_status_bar (void)
 
     if (old_rr != current_rr) {
 
-      if (is_heart_rate_stable) {
+      if (was_heart_rate_found) {
         draw_label_value(int_to_charp((int) current_rr),int_to_charp((int) old_rr),  G_RR_Y);  
       }
       
@@ -1577,7 +1541,7 @@ static void draw_status_bar (void)
       old_time = t;
     }
 
-    int s = is_heart_rate_stable ? get_symptom(current_bpm) : old_sym;
+    int s = was_heart_rate_found ? get_symptom(current_bpm) : old_sym;
     
     if (s != old_sym) {
       draw_label_value(getVerboseSymptom(s),getVerboseSymptom(old_sym), G_DETECTED);
@@ -1662,7 +1626,6 @@ static void sd_menu_loop()
   }
 
   // map pot reading to index of file
-  // TODO: filter poti values for more stable selection.
   file_index = map(current_pot_reading, 0, MAX_POT_READING, 0, filec);
 
   if (file_index != previous_file_index) {
@@ -1717,14 +1680,21 @@ static void setup_recall(void)
 
   // Load the selected file given by file_index;
   if (!loadLogFile()) {
-    #ifdef DEBUG
-      cout << pstr("LoadLogFile: error") << endl;
-    #endif
+    tft.fillScreen(ILI9341_BLACK);
+    tft.setCursor(SCREEN_WIDTH/4-20, SCREEN_HEIGHT/2);
+    tft.setTextColor(C_LABEL);
+    tft.setTextSize(3);
+    tft.print(log_files[file_index]);
+    tft.setCursor(SCREEN_WIDTH/4-20, SCREEN_HEIGHT/2-50);
+    tft.print(PSTR("Loading failed!"));
+
+    delay (1000);
+
+    setStatus(SD_MENU);
   }
 
   graphics_setup();
 
-  // TODO, remove
   current_pot_reading = 0;
 }
 
@@ -1733,7 +1703,7 @@ static void setup_recall(void)
 static void read_status_readings_from_buffer(int pos)
 {
   int starting_pos = pos - (SAMPLING_RATE * 3);
-  int end_pos = pos + SAMPLES_PER_SCREEN_AVAILABLE; //+ (SAMPLING_RATE * 3);
+  int end_pos = pos + SAMPLES_PER_SCREEN_AVAILABLE;
 
   // normalize the borders
   starting_pos = max(0, starting_pos);
@@ -1745,7 +1715,6 @@ static void read_status_readings_from_buffer(int pos)
   int rcl_beat_count = 0;
   int rcl_beat_buff[5];
 
-  //cout << "search begin" << endl;
   // start searching backwards
   for(int i = end_pos-1; i >= starting_pos; --i) {
     #ifdef DEBUG
@@ -1758,7 +1727,6 @@ static void read_status_readings_from_buffer(int pos)
       rcl_beat_count++;
     }
   }
-  //cout << "search end" << endl;
   
   int rcl_rr_sum = 0;
   int rcl_current_time = rcl_beat_buff[0];
@@ -1789,8 +1757,6 @@ static void draw_recall_graph(void)
   
   last_drawn_pos = 0;
   screen_pos = 0;
-
-  
 
   if(old_measurement_index != pos){
 
@@ -2080,8 +2046,6 @@ void button_loop(){
 //                                   SETUP                               //
 ///////////////////////////////////////////////////////////////////////////
 
-long last_time;
-
 void setup (void)
 {
     #ifdef DEBUG
@@ -2149,10 +2113,6 @@ void setup (void)
 
     // Setup the heart rate signal acquisition.
     setupHeartRateAcquisition(); 
-
-    #ifdef DEBUG
-        last_time = millis();
-    #endif  
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -2160,9 +2120,9 @@ void setup (void)
 ///////////////////////////////////////////////////////////////////////////
 
 /**
- * Finalizes the heart rate measurement.
+ * Finish a successful heart rate measurement.
  */
-void finalize(void)
+void finish_measurement(void)
 {
     // Clear the ADC IMU interrupts.
     noInterrupts();
@@ -2180,7 +2140,7 @@ void finalize(void)
         closeLogFile();
     }
 
-    // Stop the measurement of heart rate.
+    // Claim the heart rate measurement as stopped.
     setStatus(STOPPED);
 
     // Finally, forget all the acquired samples.
@@ -2189,6 +2149,44 @@ void finalize(void)
     last_beat_measure_index = 0;
     measurement_done = false;
     interrupts();
+
+    // Show for 5 seconds a short result screen.
+    tft.fillScreen(ILI9341_BLACK);
+
+    tft.setCursor(SCREEN_WIDTH/4-40, SCREEN_HEIGHT/2-70);
+    tft.setTextColor(C_LABEL);
+    tft.setTextSize(3);
+    tft.print(PSTR("Estimated BPM"));
+    tft.setCursor(SCREEN_WIDTH/2-50, SCREEN_HEIGHT/2-20);
+    tft.setTextColor(ILI9341_YELLOW);
+
+    tft.setTextSize(5);
+    tft.print(heart_beat_count*2);
+
+    tft.setTextSize(2);
+    tft.setCursor(SCREEN_WIDTH/4-20, SCREEN_HEIGHT/2+70);
+    tft.setTextColor(C_LABEL);
+    tft.print(PSTR("Bradycardia: "));
+    if (!bradycardia_detected) {
+        tft.setTextColor(C_GREEN);
+        tft.print(PSTR("No"));
+    } else {
+        tft.setTextColor(ILI9341_RED);
+        tft.print(PSTR("Yes"));
+    }
+
+    tft.setCursor(SCREEN_WIDTH/4-20, SCREEN_HEIGHT/2+45);
+    tft.setTextColor(C_LABEL);
+    tft.print(PSTR("Tachycardia: "));
+    if (!tachycardia_detected) {
+        tft.setTextColor(C_GREEN);
+        tft.print(PSTR("No"));
+    } else {
+        tft.setTextColor(ILI9341_RED);
+        tft.print(PSTR("Yes"));
+    }
+
+    delay (5000);
 
     // Reset the heart rate display.
     init_graphical_buttons();
@@ -2229,8 +2227,7 @@ static void resetRecording(void)
     rr_interval_i = 0;
     rr_interval_initialized = false;
     heart_beat_threshold = START_HEART_BEAT_THRESHOLD;
-    last_beat_threshold = heart_beat_threshold;
-    is_heart_rate_stable = false;
+    was_heart_rate_found = false;
     threshold_tick = 0;
 
     // Reset detected syndrom
@@ -2241,62 +2238,12 @@ static void resetRecording(void)
     graphics_setup();
 }
 
-// Resets all variables.
-void resetVariables(void)
-{
-    resetRecording();
-
-    // Status of the heart rate monior.
-    status = STOPPED;
-    old_status = RUNNING;
-
-    // Signals whether the a measurment of the heart rate is done.
-    measurement_done = false;
-    measure_index = 0;
-    last_beat_measure_index = 0;
-
-    // moving average buffer reset
-    ma_buf.initialized = false;
-
-    // State variables used for the debouncing of the button state.
-    for(int i = 0; i < NUM_BUTTONS; i++){
-      lastDebounceTime[i] = 0;
-      lastButtonState[i] = HIGH;
-      buttonState[i] = 0;
-    }
-
-    // Stabilization window buffer.
-    stab_buf_i = 0;
-    stab_buf_initialized = false;
-    was_stable = true;
-    last_time_stable = 0;
-    wait_for_stable = false;
-    max_stab_val = 0;
-    min_stab_val = 5000;
-
-    // Graphics    
-    last_drawn_pos = 0;
-
-    found_beat = false;
-}
-
 ///////////////////////////////////////////////////////////////////////////
 //                                 MAIN LOOP                             //
 ///////////////////////////////////////////////////////////////////////////
 
 void loop (void)
 {
-    #ifdef DEBUG
-        long current_time = millis();
-        long runtime = (current_time - last_time);
-
-        if(runtime > 3){
-          cout << pstr("Runtime: ") << (current_time - last_time) << endl;  
-        }
-
-        last_time = current_time;
-    #endif
-
     // Was the button pressed to either start or abort a measurement?
     if(wasVButtonPressed(GBT_REC)) {
 
@@ -2310,9 +2257,8 @@ void loop (void)
 
         // Otherwise, abort the current heart rate measurement.
         } else {
-
             // Finalize the heart rate measurement.
-            finalize();
+            finish_measurement();
         }
     }
 
@@ -2328,7 +2274,7 @@ void loop (void)
         interrupts();
 
         /* Acquire the lastest filtered sample of the heart rate signal.
-         * The this signal is already low-pass-filtered by a 32-slots
+         * This signal is already low-pass-filtered by a 32-slots
          * hardware averager. */
         uint16_t sample = aqcuireHeartRateSignal();
 
@@ -2348,16 +2294,16 @@ void loop (void)
         /////////// NON LINEAR TRANSFORMATION STAGE ////////////
         
         // Compute Slope of the Bandpass Filtered Signal -> Five-Point Derviation
-        int sample_derivated = derivate (sample_high_passed);
+        int slope = derivate (sample_high_passed);
         // Square the Slope -> Turns the signal positive.
-        int sample_squared = sample_derivated*sample_derivated;
+        int squared_slope = slope*slope;
 
-        // Moving Window Integration
-        addToMovingAverageBuffer(ma_buf, sample_squared);
-        int sample_transformed = (int)(getAverage(ma_buf) + 0.5f);
+        // Compute moving window integral.
+        addToMovingIntegratorBuffer(squared_slope);
+        int average_slope_integral = getIntergral() + 0.5f;
         
         #ifdef DEBUG
-            analogWrite(A9, sample_transformed);
+            analogWrite(A9, average_slope_integral);
         #endif
         
         if (status == RUNNING) {
@@ -2365,7 +2311,7 @@ void loop (void)
             // Analyze heart rate signal.
             uint16_t bpm = 0;
             uint16_t rr = 0;
-            bool beat_occured = detectHeartBeat(sample_transformed, bpm, rr);
+            bool beat_occured = detectHeartBeat(average_slope_integral, bpm, rr);
             
             // Did there occur any beat?
             if (beat_occured) {
@@ -2379,10 +2325,11 @@ void loop (void)
                 // The heart rate was found when there where at minimum 5 heart beats detected.
                 // Then the internal RR buffer is considered as stable and the values are trustful.
                 if (heart_beat_count == 5) {
-                  is_heart_rate_stable = true;
+                  was_heart_rate_found = true;
                 }
 
-                if (is_heart_rate_stable) { 
+                // Was the heart rate already found?
+                if (was_heart_rate_found) { 
 
                   // Update statistics.
                   current_bpm = bpm;
@@ -2396,10 +2343,6 @@ void loop (void)
                   if (current_bpm > TACHYCARDIA_BPM) {
                     tachycardia_detected = true;
                   }
-                } else {
-                  #ifdef DEBUG
-                    cout << "unstable heart rate" << endl;
-                  #endif
                 }
             }
 
@@ -2416,7 +2359,7 @@ void loop (void)
             if (measure_index == MEASUREMENT_SIZE) {
                 measurement_done = true;
                 // Finalize the heart rate measurement.
-                finalize();
+                finish_measurement();
             }
         }
     }
@@ -2426,7 +2369,7 @@ void loop (void)
 
         bool is_stable = isSignalStable();
 
-        // Was a heart rate measurement recently started and we are waiting until it is stable?
+        // Was a heart rate measurement recently started and we are waiting until the signal is stable?
         if (status == STABILIZING) {
 
             // Is the heart signal stable now?
