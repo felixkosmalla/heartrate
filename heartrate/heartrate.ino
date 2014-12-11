@@ -1079,7 +1079,7 @@ static void addToStabilizationBuffer(uint16_t sample)
 
 // Current maxima and minima of the stabilization window.
 static uint32_t max_stab_val = 0;
-static uint32_t min_stab_val = 5000;
+static uint32_t min_stab_val = 6000;
 
 /**
  * Checks whether the heart rate signal is too much noisy, i.e., if the signal is stable.
@@ -1095,7 +1095,7 @@ static bool isSignalStable (void)
     }
 
     // In case of too much noise, the signal is instable.
-    bool stable = (max_stab_val < 4000 && min_stab_val > 100);
+    bool stable = (max_stab_val < 6000 && min_stab_val > 100);
 
     return stable;
 }
@@ -2143,50 +2143,51 @@ void finish_measurement(void)
     // Claim the heart rate measurement as stopped.
     setStatus(STOPPED);
 
+    if (measurement_done) {
+        // Show for 5 seconds a short result screen.
+        tft.fillScreen(ILI9341_BLACK);
+
+        tft.setCursor(SCREEN_WIDTH/4-40, SCREEN_HEIGHT/2-70);
+        tft.setTextColor(C_LABEL);
+        tft.setTextSize(3);
+        tft.print(PSTR("Estimated BPM"));
+        tft.setCursor(SCREEN_WIDTH/2-50, SCREEN_HEIGHT/2-20);
+        tft.setTextColor(ILI9341_YELLOW);
+
+        tft.setTextSize(5);
+        tft.print(heart_beat_count*2);
+
+        tft.setTextSize(2);
+        tft.setCursor(SCREEN_WIDTH/4-20, SCREEN_HEIGHT/2+70);
+        tft.setTextColor(C_LABEL);
+        tft.print(PSTR("Bradycardia: "));
+        if (!bradycardia_detected) {
+            tft.setTextColor(C_GREEN);
+            tft.print(PSTR("No"));
+        } else {
+            tft.setTextColor(ILI9341_RED);
+            tft.print(PSTR("Yes"));
+        }
+
+        tft.setCursor(SCREEN_WIDTH/4-20, SCREEN_HEIGHT/2+45);
+        tft.setTextColor(C_LABEL);
+        tft.print(PSTR("Tachycardia: "));
+        if (!tachycardia_detected) {
+            tft.setTextColor(C_GREEN);
+            tft.print(PSTR("No"));
+        } else {
+            tft.setTextColor(ILI9341_RED);
+            tft.print(PSTR("Yes"));
+        }
+
+        delay (5000);
+    }
+
     // Finally, forget all the acquired samples.
-    noInterrupts();
     measure_index = 0;
     last_beat_measure_index = 0;
     measurement_done = false;
-    interrupts();
 
-    // Show for 5 seconds a short result screen.
-    tft.fillScreen(ILI9341_BLACK);
-
-    tft.setCursor(SCREEN_WIDTH/4-40, SCREEN_HEIGHT/2-70);
-    tft.setTextColor(C_LABEL);
-    tft.setTextSize(3);
-    tft.print(PSTR("Estimated BPM"));
-    tft.setCursor(SCREEN_WIDTH/2-50, SCREEN_HEIGHT/2-20);
-    tft.setTextColor(ILI9341_YELLOW);
-
-    tft.setTextSize(5);
-    tft.print(heart_beat_count*2);
-
-    tft.setTextSize(2);
-    tft.setCursor(SCREEN_WIDTH/4-20, SCREEN_HEIGHT/2+70);
-    tft.setTextColor(C_LABEL);
-    tft.print(PSTR("Bradycardia: "));
-    if (!bradycardia_detected) {
-        tft.setTextColor(C_GREEN);
-        tft.print(PSTR("No"));
-    } else {
-        tft.setTextColor(ILI9341_RED);
-        tft.print(PSTR("Yes"));
-    }
-
-    tft.setCursor(SCREEN_WIDTH/4-20, SCREEN_HEIGHT/2+45);
-    tft.setTextColor(C_LABEL);
-    tft.print(PSTR("Tachycardia: "));
-    if (!tachycardia_detected) {
-        tft.setTextColor(C_GREEN);
-        tft.print(PSTR("No"));
-    } else {
-        tft.setTextColor(ILI9341_RED);
-        tft.print(PSTR("Yes"));
-    }
-
-    delay (5000);
 
     // Reset the heart rate display.
     init_graphical_buttons();
