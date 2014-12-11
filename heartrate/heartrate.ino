@@ -443,19 +443,12 @@ static float lowPassFilter(float input)
 FIR filter designed with
  http://t-filter.appspot.com
 
-sampling frequency: 2000 Hz
-
+sampling frequency: 250 Hz
 fixed point precision: 16 bits
 
-* 0 Hz - 5 Hz
-  gain = 0
-  desired attenuation = -40 dB
-  actual attenuation = n/a
+block band: 0 Hz - 5 Hz
+pass band: 6 Hz - 125 Hz
 
-* 6 Hz - 125 Hz
-  gain = 1
-  desired ripple = 5 dB
-  actual ripple = n/a
 */
 
 #define HIGHPASSFILTER_TAP_NUM 5
